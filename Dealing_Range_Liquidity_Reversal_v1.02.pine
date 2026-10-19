@@ -1,0 +1,2764 @@
+//@version=6
+// ─────────────────────────────────────────────────────────────────────────
+// Dealing Range Liquidity Reversal  v1.02
+//
+// One dealing range (DR) per chart, on the daily schedule or fixed by date.
+// In the execution window (EW) a sweep of the DR arms the reversal and the
+// CISD sets the state. Later confirmations print OBs, and a single-candle block
+// that trades into the most recent living parent and pushes off it prints a
+// PB. OBs and PBs are hidden by default (display only; still detected).
+//
+// Detection is purely structural. No ATR, no point thresholds.
+//   CISD (v7.24)
+//     run      the consecutive bearish candles (bullish for a short) into the
+//              raid extreme: ending at the raid candle, or at the candle before
+//              it when the raid candle closes the other way. A doji or an
+//              opposite candle ends the run
+//     accept   the first body close above the sweep (the highs of every
+//              candle that traded beyond the DR level), or above the whole run
+//     level    the run candle that close takes: the CLOSEST one, the highest
+//              open still below the close (lowest above, for a short), at or
+//              beyond the swept DR level. The block runs from it to the end of
+//              the run. A lower low before acceptance re-reads the run. One
+//              CISD per raid extreme
+//   OB / PB
+//     swing    strictly higher (lower) than the two candles either side; a tie
+//              is not a swing
+//     leg      from the previous swing to the swing it ends at, inside the EW
+//     level    the open of the earliest opposing candle of the leg a close
+//              goes back through; confirmed by a candle in the reversal
+//              direction that advances past the highest living block
+//
+// Entry model. Two paths per CISD:
+//   A  sweep -> CISD -> FVG: the first FVG in the reversal direction after
+//      the raid extreme (the IFVG is the fallback only after the MSS prints
+//      with no FVG presented). Volume imbalances chained before its first
+//      candle join the zone. Stacked gaps join it only in Merge mode.
+//   B  sweep -> CISD -> MSS -> FVG: the gap whose middle candle is the MSS
+//      candle.
+// The zone's entry edge must sit inside the DR. Limit at the near edge; stop
+// beyond the zone's first candle (its low for a long, its high for a short;
+// an IFVG keeps its far edge); target EQ if it pays 2R, else the DR's 0.705
+// from the swept extreme if it pays 2R (TP at EQ); the DR's far end if it
+// pays 2R (TP at the opposite DR extreme); both on, EQ is TP1 and the far end
+// TP2. No target at 2R, no trade. The first limit touched
+// fills. A candle that touches the entry and the target together is no trade:
+// OHLC cannot say which came first. Flat at EW close, or at a CISD kill.
+// A stop ends the trade, not the idea: while the CISD holds, the setup
+// re-opens on the next new FVG after each stop. EQ before a re-entry ends it.
+//
+// Invalidation (v7.25): each PD array dies by itself on two consecutive body
+// closes beyond it.
+//   DR side  a line. Dead: that side waits for a close back inside the DR.
+//            A close a quarter of the DR's length beyond it: side off.
+//   CISD     its block, the bodies of its candles. Dead: its OBs, PBs and FVG
+//            go with it, an open trade is flattened, and hunting restarts.
+//   OB/PB    its block, the bodies of its candles
+//   FVG      its far edge, that zone only
+// Three PD arrays carry a setup: the sweep, the CISD and the FVG. A wick
+// through any of them breaches nothing.
+//
+// Mean threshold is bodies-only, (open + close) / 2. Retest arrows are gated
+// by EQ: longs from levels in discount, shorts from levels in premium.
+//
+// CME clock: perpetuals that mirror a CME market skip the daily halt and the
+// weekend. DR and EW time stand still, and swings, gaps and every bar scan
+// read only the candles a futures chart would print.
+//
+// Charts up to 4H. Windows are read by candle open time, so on 1H and 4H the
+// DR / EW times should sit on candle boundaries.
+//
+// Bar scans reach back 500 candles. An EW that runs more than 500 candles
+// past its raid extreme stops finding zones: for a long Dated DR use 5m or
+// higher.
+//
+// Versions
+//   v1.02 Gap sweep: when the DR extreme is swept by the reopen candle (after
+//         the daily halt or the weekend) with a gap toward the sweep, the
+//         CISD comes from the run into the DR extreme, and the reopen
+//         candle may accept it with its own close. Picked as in v7.25. The
+//         run is kept as values, so it still reads on 1m-5m after a
+//         weekend. Stop: when the zone's first candle is the raid
+//         extreme, the stop goes beyond the next candle instead (18 Oct
+//         5m: 29,255, not the 29,087 sweep low). Swept level: dotted line at the
+//         level, and the status line says whether it armed or why not.
+//         CME clock: the Clock row says when price went beyond the DR
+//         while CME was closed and was ignored. Status block rebuilt:
+//         short Status / Next / Swept / Clock rows, then the trade row.
+//   v1.01 First public release. Engine unchanged from v7.28. Settings:
+//         the Session group is now DR window, the execution window's
+//         end reads HH : MM, and Session boxes is now DR / EW boxes.
+// Pre-release development
+//   v7.28 Stop and target act on the tick, like a platform closing the
+//         position: trade off the chart, status and Stop hit / Target hit
+//         alerts on the touch. Live, the first level touched wins; on history
+//         a candle through both stays unclear. EW close and kills unchanged.
+//   v7.27 TP at EQ and TP at the opposite DR extreme, each a checkbox. Both
+//         on: EQ (or the 0.705) is TP1 and the trade runs to the DR's far end,
+//         TP2, each label carrying its R. The run walk-back is rewritten as one
+//         staged walk (v7.26's never ran on TradingView). The status line shows
+//         what the CISD hunt reads on each side.
+//   v7.26 A run into the raid that holds no candle opened inside the DR
+//         keeps walking back through candles fully outside the DR to the
+//         one that opened inside it, so 1m/2m find the same CISD as 3m/5m.
+//   v7.25 CISD accepted by a body close above the sweep (or the whole run),
+//         taking the closest run candle below that close.
+//         Every PD array is a block that dies by itself on two consecutive
+//         body closes beyond it: DR high / low (a line), CISD, OB, PB (the
+//         bodies of their candles), FVG. A dead DR side waits for a close
+//         back inside; a quarter-DR expansion beyond it turns that side off.
+//         A dead CISD still takes its OBs, PBs, FVG and open trade with it.
+//   v7.24 CISD from the run into the raid extreme: the open of the run's first
+//         candle, accepted on the first close back through it. Older legs can
+//         no longer print as the CISD.
+//   v7.23 Session dropdown removed. The EW starts at the DR's end; only its
+//         end time is set. Alerts are tagged with the DR window.
+//   v7.22 Stacked FVGs setting. First gap only (default): path A trades the
+//         first gap after the raid extreme and never extends. Merge: v7.11
+//         behaviour.
+//   v7.21 Trade levels: one trade at a time, Engine or Manual. Manual draws
+//         your RR calculator levels on the chart and in the status block in
+//         place of the engine's trade.
+//   v7.20 Session dropdown. Dated DR in its own group with an EW end; it
+//         starts on the first CME-valid candle at or after From. -1 / +1
+//         and the range stats / filter removed. The CME clock reaches the
+//         structure. Entry and target on one candle is no trade. 0.705
+//         rounded on its own price step. Runs on charts up to 4H.
+//         Settings reset required.
+//   v7.19 Dated DR.
+//   v7.18 CISD at the earliest candidate a close takes; any close confirms
+//         it; third kill (two closes back through the CISD); a re-formed
+//         CISD works from its own swing; chained volume imbalances; stop at
+//         the zone's first candle; 2R minimum; RR calculator; trade shown
+//         as labels on a dotted bracket.
+//   v7.17 Swept level.
+//   v7.16 CISD kill on one close beyond the raid extreme.
+//   v7.15 Uncapped re-entry after a stop; FVG violated by two body closes.
+//   v7.14 A stop keeps the zone on the chart.
+//   v7.12 CME clock detection for BINANCE:CLUSDT.P.
+//   v7.11 Stacked FVGs merge into one zone.
+//   v7.10 CME clock on every HIP3XYZ market and CLUSDT.P; first opposing
+//         candle anchors the CISD; CISD kill by two closes beyond the DR.
+//   v7.0-7.9 Entry model (MSS, FVG / IFVG, two paths), CME clock (hold, not
+//         gate), CISD and blocks contained in the EW.
+//   v60-v69 Delivery freeze, retracement band, DR / EW naming.
+// ─────────────────────────────────────────────────────────────────────────
+indicator("Dealing Range Liquidity Reversal", overlay = true,
+     max_lines_count = 500, max_labels_count = 500, max_boxes_count = 500,
+     max_bars_back = 1000)   // the bar scans read close[off] at dynamic offsets
+// ─── Market ───────────────────────────────────────────────────────────────
+cmeClockOn = input.bool(true, "Hold perpetual futures to the CME clock", group = "Market",
+     tooltip = "Applies only to perpetual futures that mirror a CME market (every trade.xyz / HIP3XYZ market, BINANCE:CLUSDT.P). On: candles from Friday 17:00 to Sunday 18:00 NY and in the daily 17:00-18:00 halt are ignored, as on the futures contract. The DR and EW do not run through them, and swings, gaps and blocks are read as if they were not on the chart. Off: the perpetual runs 24/7, so DRs and setups also form on weekends and through the halt. Futures charts are never affected.")
+// ─── DR window (NY time; DST handled automatically) ────────────────────────
+grpSes = "DR window"
+sesLiq     = input.session("1800-2000", "Dealing range", group = grpSes, inline = "s1")
+sesLiqCol  = input.color(color.new(#801922, 90), "", group = grpSes, inline = "s1")
+// v7.23: the EW starts where the DR ends; only its end is set (hour, minute).
+// v1.01: two-digit lists, so the end reads 06 : 00 rather than 6 : 0.
+ewEndH     = input.string("00", "Execution window ends", options = ["00", "01", "02", "03", "04", "05", "06", "07", "08", "09", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", "21", "22", "23"], group = grpSes, inline = "s2",
+     tooltip = "Hour and minute, New York time. The execution window always starts at the dealing range's end, so a 19:00-23:00 DR with an end of 10:00 gives an EW of 23:00 to 10:00. It may cross midnight.")
+ewEndM     = input.string("00", ":", options = ["00", "01", "02", "03", "04", "05", "06", "07", "08", "09", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", "21", "22", "23", "24", "25", "26", "27", "28", "29", "30", "31", "32", "33", "34", "35", "36", "37", "38", "39", "40", "41", "42", "43", "44", "45", "46", "47", "48", "49", "50", "51", "52", "53", "54", "55", "56", "57", "58", "59"], group = grpSes, inline = "s2")
+sesExecCol = input.color(color.new(#424351, 90), "", group = grpSes, inline = "s2")
+string drEndHm = str.substring(sesLiq, 5, 9)
+string ewEndHm = ewEndH + ewEndM
+string sesExec = drEndHm + "-" + ewEndHm
+if ewEndHm == drEndHm
+    runtime.error("The execution window must end at a different time from the dealing range's end.")
+// ─── Dated DR ─────────────────────────────────────────────────────────────
+grpDt = "Dated DR"
+datedOn    = input.bool(false, "Dated DR", group = grpDt,
+     tooltip = "A dealing range fixed by date and time instead of the daily schedule. It can run any length and across days. The execution window opens at To and closes at EW to. From its start the daily schedule is off. Untick to go back to it. The pickers follow TradingView's date convention, which may not be New York time: after setting From, check that the DR box starts on the candle you meant.")
+datedStart = input.time(timestamp("2026-10-11T19:00:00-04:00"), "From", group = grpDt, active = datedOn)
+datedEnd   = input.time(timestamp("2026-10-12T23:00:00-04:00"), "To", group = grpDt, active = datedOn)
+datedEwTo  = input.time(timestamp("2026-10-13T10:00:00-04:00"), "EW to", group = grpDt, active = datedOn)
+if datedOn and (datedEnd <= datedStart or datedEwTo <= datedEnd)
+    runtime.error("Dated DR: To must be after From, and EW to must be after To.")
+// ─── Swept level ──────────────────────────────────────────────────────────
+grpSw = "Swept level"
+sweptOn  = input.bool(false, "Swept level", group = grpSw, inline = "sw")
+sweptLvl = input.price(0.0, "", group = grpSw, inline = "sw",
+     tooltip = "Tick it when the DR's own extreme took a key level you marked (PDL, PDH, an old swing high or low), and type that level, not the DR high or low itself. A level below EQ: if the DR low traded below it, the DR closes with its low already swept. A level above EQ: the same for the DR high. The engine then hunts the CISD from that sweep in the execution window. A dotted line marks the level and the status line says whether it armed. Applies to the latest DR only. Untick it when that DR's execution window is done.")
+// ─── DR / EW boxes (display only) ─────────────────────────────────────────
+grpBox = "DR / EW boxes"
+sessionsDrawn = input.int(1, "DRs drawn", minval = 1, maxval = 100, group = grpBox,
+     tooltip = "How many dealing ranges keep their drawings on the chart, counting back from the current one. 1 shows only the current DR. Raise it to audit past DRs against your own marks, then put it back.")
+showLiqBox  = input.bool(true, "Dealing range box", group = grpBox, inline = "bx")
+showExecBox = input.bool(false, "Execution box", group = grpBox, inline = "bx")
+showBoxTxt  = input.bool(false, "Display DR/EW tags", group = grpBox)
+boxTxtSize  = input.string("Auto", "Text size", options = ["Auto", "Tiny", "Small", "Normal", "Large", "Huge"], group = grpBox)
+// Box fills use the transparency carried by the DR / EW colours.
+txtTransp   = input.int(95, "Text transparency", minval = 0, maxval = 100, group = grpBox)
+// ─── Levels ───────────────────────────────────────────────────────────────
+grpDR = "DR levels"        // the market reference framework
+grpST = "Structure levels" // what the model draws and executes from
+liqHiTxtOn = input.bool(true, "DR high", group = grpDR, inline = "lh")
+liqHiCol   = input.color(color.new(#424351, 50), "", group = grpDR, inline = "lh")
+liqHiTxt   = input.string("DR H", "", group = grpDR, inline = "lh")
+liqHiWidth = input.int(1, "Width", minval = 1, maxval = 5, group = grpDR, inline = "lh")
+liqLoTxtOn = input.bool(true, "DR low", group = grpDR, inline = "ll")
+liqLoCol   = input.color(color.new(#424351, 50), "", group = grpDR, inline = "ll")
+liqLoTxt   = input.string("DR L", "", group = grpDR, inline = "ll")
+liqLoWidth = input.int(1, "Width", minval = 1, maxval = 5, group = grpDR, inline = "ll")
+liqValOn  = input.bool(true, "DR values", group = grpDR, inline = "lv")
+liqValCol = input.color(color.new(#424351, 50), "", group = grpDR, inline = "lv")
+eqOn    = input.bool(true, "EQ", group = grpDR, inline = "eq")
+eqCol   = input.color(color.new(#424351, 50), "", group = grpDR, inline = "eq")
+eqStyle = input.string("Dotted", "", options = ["Solid", "Dotted", "Dashed"], group = grpDR, inline = "eq")
+eqWidth = input.int(1, "Width", minval = 1, maxval = 5, group = grpDR, inline = "eq")
+eqValOn  = input.bool(true, "EQ value", group = grpDR, inline = "ev")
+eqValCol = input.color(color.new(#424351, 50), "", group = grpDR, inline = "ev")
+obOn      = input.bool(true, "Structure", group = grpST, inline = "ob")
+obBearCol = input.color(#F23645, "", group = grpST, inline = "ob")
+obBullCol = input.color(#2962FF, "", group = grpST, inline = "ob")
+obStyle   = input.string("Solid", "", options = ["Solid", "Dotted", "Dashed"], group = grpST, inline = "ob")
+obWidth   = input.int(2, "Width", minval = 1, maxval = 5, group = grpST, inline = "ob")
+obPbOn    = input.bool(false, "OB / PB", group = grpST,
+     tooltip = "Show order blocks and propulsion blocks, with their retest arrows. Display only: they are still detected and invalidated underneath, and nothing in the entry model reads them. The CISD always shows when Structure is on.")
+rtDnCol = input.color(#F23645, "Retest", group = grpST, inline = "rt")
+rtUpCol = input.color(#2962FF, "", group = grpST, inline = "rt")
+retestSize = input.string("Small", "", options = ["Tiny", "Small", "Normal", "Large", "Huge"], group = grpST, inline = "rt")
+lineLength = input.int(10, "Line length (bars)", minval = 1, maxval = 50, group = grpST)
+blockOn    = input.bool(true, "Block boxes", group = grpST,
+     tooltip = "Draw the CISD, OB and PB as boxes over their blocks (the bodies of their candles). Display only: the blocks are still measured and still die on two body closes beyond them when the boxes are off.")
+blockOpac  = input.int(5, "Block opacity %", minval = 0, maxval = 100, group = grpST,
+     tooltip = "Fill strength of the block boxes, in the Structure colours. 100 is solid, 0 is invisible.")
+// ─── Entry model ──────────────────────────────────────────────────────────
+grpE = "Entry model"
+mssOn      = input.bool(true, "MSS", group = grpE, inline = "e1")
+mssBearCol = input.color(#F23645, "", group = grpE, inline = "e1")
+mssBullCol = input.color(#2962FF, "", group = grpE, inline = "e1")
+mssStyle   = input.string("Dashed", "", options = ["Solid", "Dashed", "Dotted"], group = grpE, inline = "e1")
+zoneOn     = input.bool(true, "FVG / IFVG", group = grpE, inline = "e2")
+bullFvgCol  = input.color(color.new(#787B86, 80), "Bull FVG Color", group = grpE, inline = "e3")
+bearFvgCol  = input.color(color.new(#FF9800, 80), "Bear FVG Color", group = grpE, inline = "e3")
+bullIfvgCol = input.color(color.new(#FF9800, 80), "Bull IFVG Color", group = grpE, inline = "e4")
+bearIfvgCol = input.color(color.new(#787B86, 80), "Bear IFVG Color", group = grpE, inline = "e4")
+// v7.22: how path A treats gaps stacked on the first one.
+stackMode = input.string("First gap only", "Stacked FVGs", options = ["First gap only", "Merge"], group = grpE,
+     tooltip = "First gap only: path A trades the first FVG after the raid extreme, alone. Best R when price comes back to it; in a fast displacement it may never fill. Merge: later gaps that share a candle with it join one zone, entry at the new near edge, stop under the first gap's first candle. Fills more often, wider risk.")
+bool mergeOn = stackMode == "Merge"
+fvgLen     = input.int(10, "FVG line length (bars)", minval = 1, maxval = 50, group = grpE,
+     tooltip = "How far the FVG / IFVG box and its C.E. line run past the bar that armed them. A zone that is still armed or filled keeps running with price beyond that.")
+terminateOn = input.bool(true, "Freeze the EW once delivery completes", group = grpE,
+     tooltip = "When price trades through the CISD's target, the far end of the dealing range, the setup's job is done: no new blocks, retests or setups for the rest of the execution window.")
+terminateMark = input.bool(true, "Mark the completion bar", group = grpE,
+     tooltip = "Draws a small ✓ at the target when delivery completes, so a quiet chart reads as finished rather than broken.")
+// ─── RR calculator ────────────────────────────────────────────────────────
+grpRR = "RR calculator"
+calcEn = input.price(0.0, "Entry", group = grpRR, inline = "rr")
+calcSl = input.price(0.0, "SL", group = grpRR, inline = "rr")
+calcTp = input.price(0.0, "TP", group = grpRR, inline = "rr",
+     tooltip = "Your own entry, stop and target. Shown on the chart and in the status block when Trade levels is set to Manual.")
+// v7.21: one trade is shown at a time, the engine's or yours. Never both.
+lvlSrc = input.string("Engine", "Trade levels", options = ["Engine", "Manual"], group = grpRR,
+     tooltip = "Engine: the indicator's own trade. Limit at the zone's near edge, stop beyond the zone's first candle, targets per the TP checkboxes below (EQ, the opposite DR extreme, or both), 2R or more, else no trade. Manual: the Entry, SL and TP you typed above, with their R. Either way the chart and the status block show that one trade only.")
+// v7.27: where the engine's trade takes profit. Either target, or both, on
+// one row under Trade levels.
+tpEqIn = input.bool(true, "TP at EQ", group = grpRR, inline = "tp")
+tpDr   = input.bool(false, "TP at the opposite DR extreme", group = grpRR, inline = "tp",
+     tooltip = "TP at EQ: the middle of the DR if it pays 2R or more, else the DR's 0.705 if it pays 2R or more. TP at the opposite DR extreme: the DR low for a short, the DR high for a long, if it pays 2R or more. Both on: EQ (or the 0.705) is TP1 and the trade runs on to the far extreme, TP2. Both off: TP at EQ is used. Engine trade only.")
+bool tpEq  = tpEqIn or not tpDr
+bool tgtDr = tpDr and not tpEq   // the opposite extreme is the ONLY target
+bool lvlOn = lvlSrc == "Engine"
+bool manOn = lvlSrc == "Manual"
+// Manual levels: valid when SL and TP sit on opposite sides of the entry.
+bool  calcSet   = calcEn > 0 and calcSl > 0 and calcTp > 0
+bool  calcLong  = calcSet and calcTp > calcEn and calcSl < calcEn
+bool  calcShort = calcSet and calcTp < calcEn and calcSl > calcEn
+float calcR     = calcLong or calcShort ? math.floor(math.abs(calcTp - calcEn) / math.abs(calcEn - calcSl) * 10) / 10 : float(na)
+// ─── Fib levels ───────────────────────────────────────────────────────────
+// Drawn across the DR once it closes. The extreme that formed FIRST carries 1,
+// the later one 0. Levels 1, 0.5 and 0 are off by default: they duplicate the
+// DR high, EQ and DR low lines.
+grpF = "Fib levels"
+fibOn     = input.bool(true, "Fib retracement", group = grpF, inline = "f0")
+fibCol    = input.color(color.new(#424351, 50), "", group = grpF, inline = "f0")
+fibStyle  = input.string("Dotted", "", options = ["Solid", "Dotted", "Dashed"], group = grpF, inline = "f0")
+fibWidth  = input.int(1, "Width", minval = 1, maxval = 5, group = grpF, inline = "f0")
+fibValOn  = input.bool(true, "Fib value", group = grpF, inline = "f1")
+fibValCol = input.color(color.new(#424351, 50), "", group = grpF, inline = "f1")
+fLv1On = input.bool(false, "Level 1", group = grpF, inline = "fv1")
+fLv1   = input.float(1.0,   "", group = grpF, inline = "fv1")
+fLv2On = input.bool(true,  "Level 2", group = grpF, inline = "fv2")
+fLv2   = input.float(0.786, "", group = grpF, inline = "fv2")
+fLv3On = input.bool(true,  "Level 3", group = grpF, inline = "fv3")
+fLv3   = input.float(0.705, "", group = grpF, inline = "fv3")
+fLv4On = input.bool(true,  "Level 4", group = grpF, inline = "fv4")
+fLv4   = input.float(0.618, "", group = grpF, inline = "fv4")
+fLv5On = input.bool(false, "Level 5", group = grpF, inline = "fv5")
+fLv5   = input.float(0.5,   "", group = grpF, inline = "fv5")
+fLv6On = input.bool(true,  "Level 6", group = grpF, inline = "fv6")
+fLv6   = input.float(0.382, "", group = grpF, inline = "fv6")
+fLv7On = input.bool(true,  "Level 7", group = grpF, inline = "fv7")
+fLv7   = input.float(0.236, "", group = grpF, inline = "fv7")
+fLv8On = input.bool(false, "Level 8", group = grpF, inline = "fv8")
+fLv8   = input.float(0.0,   "", group = grpF, inline = "fv8")
+// The OTE band holds its own ratios, independent of the Level toggles.
+fBandLo = input.float(0.618, "Retracement band", group = grpF, inline = "fb",
+     tooltip = "The zone between these two ratios, anchored the same way as the fib levels — the dealing range extreme that formed FIRST carries 1, the later one carries 0. Independent of the Level toggles above.")
+fBandHi = input.float(0.786, "", group = grpF, inline = "fb")
+fBandOn  = input.bool(true, "Shade the band", group = grpF, inline = "fbs")
+fBandCol = input.color(color.new(#FFEE58, 90), "", group = grpF, inline = "fbs")
+// ─── Status block ─────────────────────────────────────────────────────────
+grpT = "Status block"
+statusOn  = input.bool(true, "Show status block", group = grpT,
+     tooltip = "What the engine is waiting for, the CME clock on clocked perps, the armed or open trade, and your RR calculator row.")
+stPos     = input.string("Top right", "Position", group = grpT, inline = "t1",
+     options = ["Top left", "Top center", "Top right", "Middle left", "Middle center", "Middle right", "Bottom left", "Bottom center", "Bottom right"])
+stSize    = input.string("Normal", "", options = ["Tiny", "Small", "Normal", "Large"], group = grpT, inline = "t1")
+stBorderW = input.int(1, "Border", minval = 0, maxval = 3, group = grpT, inline = "t2")
+stBorderC = input.color(#F4F4F7, "", group = grpT, inline = "t2")
+stBgC     = input.color(#F4F4F7, "Background", group = grpT, inline = "t3")
+stTxtC    = input.color(color.new(#424351, 50), "Text", group = grpT, inline = "t3")
+stLblC    = input.color(color.new(#424351, 50), "Labels", group = grpT, inline = "t3")
+// ─── Alerts ───────────────────────────────────────────────────────────────
+grpAl = "Alerts"
+alCS  = input.bool(true, "CISD formed", group = grpAl, inline = "al1")
+alOB  = input.bool(false, "Structure active", group = grpAl, inline = "al1")
+alRT  = input.bool(true, "Retest confirmed", group = grpAl, inline = "al2")
+alOBX = input.bool(false, "Structure invalidated", group = grpAl, inline = "al2")
+alTH  = input.bool(true, "CISD invalidated", group = grpAl)
+alSU  = input.bool(true, "Setup ready", group = grpAl, inline = "al3")
+alZT  = input.bool(true, "Zone retest", group = grpAl, inline = "al3")
+alSH  = input.bool(true, "Stop hit", group = grpAl, inline = "al4")
+alTG  = input.bool(true, "Target hit", group = grpAl, inline = "al4",
+     tooltip = "Fire on the touch, while the candle is still open. Target hit also fires when TP1 is reached with both TP boxes on.")
+// ─── Constants ────────────────────────────────────────────────────────────
+// Not settings. Ask before changing any of them.
+int   killCloses = 2      // consecutive body closes for every two-close kill
+int   NAME_OFF   = 1      // label columns, bars past the line end
+int   VAL_OFF    = 5      // wide enough that the name never runs into the price
+int   TRADE_OFF  = 16     // trade labels: a third column clear of the values
+float RT_OFF_PCT = 0.03   // retest glyph offset, as a fraction of the DR range
+// ─── Helpers ──────────────────────────────────────────────────────────────
+styleOf(s) =>
+    s == "Dotted" ? line.style_dotted : s == "Dashed" ? line.style_dashed : line.style_solid
+sizeOf(s) =>
+    switch s
+        "Tiny"   => size.tiny
+        "Small"  => size.small
+        "Normal" => size.normal
+        "Large"  => size.large
+        "Huge"   => size.huge
+        => size.auto
+posOf(s) =>
+    switch s
+        "Top left"      => position.top_left
+        "Top center"    => position.top_center
+        "Top right"     => position.top_right
+        "Middle left"   => position.middle_left
+        "Middle center" => position.middle_center
+        "Middle right"  => position.middle_right
+        "Bottom left"   => position.bottom_left
+        "Bottom center" => position.bottom_center
+        => position.bottom_right
+fmtP(float v) =>
+    str.tostring(v, format.mintick)
+// ─── Guards ───────────────────────────────────────────────────────────────
+if not chart.is_standard
+    runtime.error("Use standard candles. Heikin Ashi, Renko and other synthetic charts move the levels this indicator draws.")
+// 4H is the highest chart. A session window is read by candle open time, so on
+// 1H and 4H set the DR / EW on candle boundaries.
+if timeframe.in_seconds() > 14400
+    runtime.error("Use this indicator on a 4H chart or lower.")
+// ─── CME clock ────────────────────────────────────────────────────────────
+// CME futures only print while CME trades, so they need nothing here. 24/7
+// perps that mirror a CME market are held to the CME calendar: nothing counts
+// from Friday 17:00 NY to Sunday 18:00 NY, or in the daily 17:00-18:00 halt.
+// The list is explicit on purpose: a true crypto perp has no CME session to
+// mirror and must not be clocked.
+//   HIP3XYZ:*            every trade.xyz market (XYZ100, SP500, GOLD, ...)
+//   BINANCE:CLUSDT.P     Binance crude oil perp (matched on prefix + ticker:
+//                        the tickerid can carry chart modifiers)
+NYTZ = "America/New_York"
+bool isClPerp   = (syminfo.prefix == "BINANCE" and syminfo.ticker == "CLUSDT.P") or str.contains(syminfo.tickerid, "BINANCE:CLUSDT.P")
+bool onCmeClock = syminfo.prefix == "HIP3XYZ" or str.contains(syminfo.ticker, "XYZ100") or isClPerp
+int  cmeDow = dayofweek(time, NYTZ)
+int  cmeHm  = hour(time, NYTZ) * 60 + minute(time, NYTZ)
+bool cmeOpen = not (onCmeClock and cmeClockOn) or not (cmeDow == dayofweek.saturday or (cmeDow == dayofweek.sunday and cmeHm < 1080) or (cmeDow == dayofweek.friday and cmeHm >= 1020) or (cmeHm >= 1020 and cmeHm < 1080))
+// Engine updates run only on candles a futures chart would have printed.
+bool barOK = barstate.isconfirmed and cmeOpen
+// ─── Session windows ──────────────────────────────────────────────────────
+// The Dated DR starts once, on the first CME-valid candle at or after From,
+// so a From inside the halt or the weekend still resets on a real candle.
+var bool datedLive = false
+bool datedFirst = false
+if datedOn and cmeOpen and not datedLive and time >= datedStart
+    datedLive  := true
+    datedFirst := true
+// Windows HOLD their last value while CME is closed. Gating them to false
+// would close a window at 17:00 and open a fresh one at 18:00 on any feed that
+// prints through the halt. From its start the Dated DR replaces the schedule:
+// DR until To, EW until EW to, then idle.
+var bool inLiq  = false
+var bool inExec = false
+if cmeOpen
+    if datedLive
+        inLiq  := time < datedEnd
+        inExec := time >= datedEnd and time < datedEwTo
+    else
+        inLiq  := not na(time(timeframe.period, sesLiq, NYTZ))
+        inExec := not na(time(timeframe.period, sesExec, NYTZ))
+        if inLiq and inExec
+            runtime.error("The execution window's end falls inside the dealing range. Change the end time.")
+// Alert tag: the DR window, so two copies of the indicator stay apart (v7.23).
+string curTag = datedLive ? "Dated DR" : "DR " + str.substring(sesLiq, 0, 2) + ":" + str.substring(sesLiq, 2, 4) + "–" + str.substring(sesLiq, 5, 7) + ":" + str.substring(sesLiq, 7, 9)
+// ─── Types ────────────────────────────────────────────────────────────────
+type Ob
+    float lvl              // anchor candle's open (body-anchored level)
+    float inv              // invalidation: mean threshold or far extreme
+    int   bi               // anchor bar index
+    float bLo = na         // block low: lowest body of its candles (v7.25)
+    float bHi = na         // block high: highest body of its candles
+    bool  touched  = false
+    bool  below    = false // price has closed beyond the level (setup side)
+    bool  fired    = false // a retest signal is live on this OB
+    int   rtCount  = 0     // consecutive engulfing candles since firing
+    float rtBodyHi = na    // rejection candle body (stored at fire time)
+    float rtBodyLo = na
+    int   invCount = 0     // consecutive closes through the invalidation level
+    bool  hasPb    = false // this block has already spawned a propulsion block
+    bool  isCisd   = false // the state-setting block (labelled ±CISD)
+    bool  isPb     = false // propulsion block: traded into a living same-side
+                           // parent OB, respected its mean threshold, and
+                           // displaced away (labelled ±PB). Never a parent itself.
+    bool  dead     = false
+    line  obLn = na
+    label lb   = na
+    label rtLb = na        // the printed retest glyph (deletable on void)
+    box   bx   = na        // v7.25: the block itself (bLo..bHi, bodies)
+// ─── State ────────────────────────────────────────────────────────────────
+var float liqHigh = na
+var float liqLow  = na
+var bool  liqClosed  = false
+var bool  sweptHi    = false    // wick through the frozen liquidity high
+var bool  sweptLo    = false    // wick through the frozen liquidity low
+var int   dirState   = 0        // 0 hunting, -1 bearish CISD held, +1 bullish CISD held
+var float cisdLvl    = na
+var float raidHi     = na       // highest high seen in the execution window since DR close
+var float raidLo     = na       // lowest low seen in the execution window since DR close
+var int   ewStartBar = na       // first EW bar of the current DR cycle; anchors must be at or after it
+var bool  deliveryDone = false  // the CISD's target was reached; session is finished
+var int   cisdSwBar  = na       // raid-extreme bar the held CISD's run ended at
+var int   usedRaid   = na       // v7.24: raid extreme a CISD was already built on
+var float cisdBlkLo  = na       // v7.25: the held CISD's block (bodies)
+var float sweepHiUp  = na       // highest high of the candles that traded below the DR low
+var float sweepLoDn  = na       // lowest low of the candles that traded above the DR high
+var float cisdBlkHi  = na
+var int   loState    = 0        // v7.25 DR low: 0 live, 1 closed through (waiting for return), 2 expanded (side off)
+var int   hiState    = 0        // DR high: same
+var int   loCnt      = 0
+var int   hiCnt      = 0
+var string killWhy   = ""       // why the held CISD died (alert text)
+var string huntUp    = ""       // v7.26: what the +CISD hunt reads (status line)
+var string huntDn    = ""       // v7.26: what the -CISD hunt reads (status line)
+var int    swState   = 0        // v1.02 swept level at DR close: 0 off, 1 armed low, 2 armed high, 3 low not taken, 4 high not taken
+var float  haltLo    = na       // v1.02 lowest low below the DR printed while CME was closed (ignored)
+var float  haltHi    = na       // v1.02 highest high above the DR printed while CME was closed (ignored)
+var line   swLvlLn   = na       // v1.02 swept level line
+var float  pvClose   = na       // v1.02 close of the last valid candle before this one
+var bool   gapLo     = false    // v1.02 the raid low was made by a reopen candle that gapped down
+var bool   gapHi     = false    // v1.02 the raid high was made by a reopen candle that gapped up
+var label  swLvlLb   = na
+var bool  killedOnce = false    // v7.18: a CISD has died in this session
+var bool  structKillUp = false  // the bullish CISD was killed on this bar
+var bool  structKillDn = false  // the bearish CISD was killed on this bar
+var int   raidHiBar  = na       // bar of raidHi
+var int   raidLoBar  = na       // bar of raidLo
+// Confirmed swing history (bar, price) — the MSS reference is read from here.
+var array<int>   slBarA = array.new<int>()
+var array<float> slPxA  = array.new<float>()
+var array<int>   shBarA = array.new<int>()
+var array<float> shPxA  = array.new<float>()
+// Entry model state. One setup per CISD.
+var int    eStage   = 0      // 0 idle, 1 waiting for MSS, 2 limit armed, 3 filled, 4 finished
+var int    eDir     = 0
+var int    eRaidBar = na     // raid extreme bar at CISD time
+var float  eMssLvl  = na
+var int    eMssRef  = na     // bar of the swing the MSS breaks
+var int    eMssBar  = na
+var bool   eIfvg    = false
+var float  eEntry   = na
+var float  eStop    = na
+var float  eTgt     = na
+var float  eRR      = na
+var int    eFillBar = na
+var int    eRound   = 1      // entry number under this CISD: 1 first, +1 after each stop
+var int    eFromBar = na     // first candle a zone may start at: the raid extreme, or the bar after the stop
+var string eMsg     = ""
+var line   eMssLn  = na
+var label  eMssLb  = na
+var label  eRtLb   = na
+var label  eEnLb   = na
+var label  eSlLb   = na
+var label  eTpLb   = na
+var label  eTp2Lb  = na       // v7.27: second target's label
+var float  eTgt2   = na       // v7.27: second target (opposite DR extreme)
+var float  eRR2    = na
+var bool   eT1Hit  = false    // v7.27: first target touched, running to the second
+var line   eVLn    = na       // dotted vertical, Entry to TP (#2962FF)
+var line   eVLnS   = na       // dotted vertical, SL to Entry (#F23645)
+// Two entry paths per CISD. State: 0 pending, 1 armed, 2 dropped / none.
+var int    aState  = 0
+var float  aTop    = na
+var float  aBot    = na
+var int    aZoneBar = na
+var bool   aIfvg   = false
+var float  aEntry  = na
+var float  aStop   = na
+var float  aTgt    = na
+var float  aRR     = na
+var int    aArmBar = na
+var int    aChainEnd = na   // c1 of the last gap merged into path A's zone
+var box    aBx     = na
+var label  aLb     = na
+var line   aCe     = na
+var int    bState  = 0
+var float  bTop    = na
+var float  bBot    = na
+var float  bEntry  = na
+var float  bStop   = na
+var float  bTgt    = na
+var float  bRR     = na
+var int    bArmBar = na
+var box    bBx     = na
+var label  bLb     = na
+var line   bCe     = na
+// A stopped trade's zone, kept on the chart as a PD array (v7.14).
+var int          zkDir = 0
+var array<float> zkFar = array.new<float>()   // far edge
+var array<int>   zkCnt = array.new<int>()     // consecutive body closes through it; two remove the zone
+var array<box>   zkBx  = array.new<box>()
+var array<label> zkLb  = array.new<label>()
+var array<line>  zkCe  = array.new<line>()
+var int    ePath   = 0        // 1 = A, 2 = B: the path shown / filled
+// Swing-structure state (declared here: the session reset below uses it)
+var int swHiBar = na        // most recent confirmed swing high
+var int swLoBar = na        // most recent confirmed swing low
+// Pending blocks are queues: on 1m several legs can wait on confirmation at
+// once. Level = lowest (bull) / highest (bear) candidate open; Bar = first
+// candidate; Sw = the swing the leg ends at; Prot = its protective swing.
+var array<float> pUpLvl = array.new<float>()
+var array<int>   pUpBar = array.new<int>()
+var array<int>   pUpSw = array.new<int>()     // bar of the swing low the leg ends at (v7.18)
+var array<float> pUpProt = array.new<float>()   // protective swing low
+var array<float> pDnLvl = array.new<float>()
+var array<int>   pDnBar = array.new<int>()
+var array<int>   pDnSw = array.new<int>()     // bar of the swing high the leg ends at (v7.18)
+var array<float> pDnProt = array.new<float>()   // protective swing high
+// OB pools (both sides tracked; direction picks the working side)
+var bearObs = array.new<Ob>()
+var bullObs = array.new<Ob>()
+var int activeIdx = -1
+// EQ: the premium/discount boundary, frozen at the dealing range close.
+// It does NOT gate whether a block validates — every block prints on its
+// own merits. EQ gates only the RETEST ARROW: longs are taken from levels
+// in discount (at or below EQ), shorts from levels in premium.
+var float eqLvl     = na
+var line  eqLn      = na
+var line  liqHiLn   = na       // per-session liquidity-high line (static, drawn at close)
+var line  liqLoLn   = na       // per-session liquidity-low line
+var int   liqStartBar = na     // first bar of the current liquidity session (line x1)
+var int   liqStartTime = na    // its time: the swept level applies to the latest DR only
+var int   liqHiBar  = na       // bar the DR high was last set on
+var int   liqLoBar  = na       // bar the DR low was last set on
+var array<line>  fibLn = array.new<line>()
+var array<label> fibLb = array.new<label>()
+var array<label> fibVb = array.new<label>()
+var box fibBandBox = na
+var label eqNameLb  = na
+var label eqValLb   = na
+var label liqHiNameLb = na
+var label liqLoNameLb = na
+var label liqHiValLb  = na
+var label liqLoValLb  = na
+// ─── Drawing retention ───────────────────────────────────────────────────
+// Every dealing range increments this. Each drawing is tagged with the count
+// current when it was made, and pruned once it falls more than N behind. This
+// replaces the old wipe-on-reset: retention, not deletion, so raising the input
+// brings the past sessions back rather than only stopping new ones vanishing.
+var int  sessSeq   = 0
+var array<line>  keepLn   = array.new<line>()
+var array<int>   keepLnS  = array.new<int>()
+var array<label> keepLb   = array.new<label>()
+var array<int>   keepLbS  = array.new<int>()
+var array<box>   keepBx   = array.new<box>()
+var array<int>   keepBxS  = array.new<int>()
+
+keepL(line l) =>
+    array.push(keepLn, l)
+    array.push(keepLnS, sessSeq)
+keepB(label b) =>
+    array.push(keepLb, b)
+    array.push(keepLbS, sessSeq)
+keepX(box x) =>
+    array.push(keepBx, x)
+    array.push(keepBxS, sessSeq)
+
+pruneDrawings() =>
+    int cut = sessSeq - sessionsDrawn
+    if array.size(keepLnS) > 0
+        for i = array.size(keepLnS) - 1 to 0
+            if array.get(keepLnS, i) <= cut
+                line.delete(array.get(keepLn, i))
+                array.remove(keepLn, i)
+                array.remove(keepLnS, i)
+    if array.size(keepLbS) > 0
+        for i = array.size(keepLbS) - 1 to 0
+            if array.get(keepLbS, i) <= cut
+                label.delete(array.get(keepLb, i))
+                array.remove(keepLb, i)
+                array.remove(keepLbS, i)
+    if array.size(keepBxS) > 0
+        for i = array.size(keepBxS) - 1 to 0
+            if array.get(keepBxS, i) <= cut
+                box.delete(array.get(keepBx, i))
+                array.remove(keepBx, i)
+                array.remove(keepBxS, i)
+
+// ─── Drawing helpers ──────────────────────────────────────────────────────
+killObDraw(Ob ob) =>
+    // Note: rtLb (a printed retest glyph) is intentionally NOT deleted here
+    // — signal history persists; only the void rule removes a glyph.
+    if not na(ob.obLn)
+        line.delete(ob.obLn)
+        ob.obLn := na
+    if not na(ob.lb)
+        label.delete(ob.lb)
+        ob.lb := na
+    if not na(ob.bx)
+        box.delete(ob.bx)
+        ob.bx := na
+drawObLines(Ob ob, int d) =>
+    if obOn and (ob.isCisd or obPbOn)
+        // v7.25: the block is drawn as a box across its candles' bodies.
+        if blockOn and not na(ob.bLo) and not na(ob.bHi)
+            ob.bx := box.new(ob.bi, ob.bHi, bar_index + lineLength, ob.bLo, border_color = na,
+                 bgcolor = color.new(d == -1 ? obBearCol : obBullCol, 100 - blockOpac))
+            keepX(ob.bx)
+        ob.obLn := line.new(ob.bi, ob.lvl, bar_index + lineLength, ob.lvl,
+             color = d == -1 ? obBearCol : obBullCol,
+             width = obWidth, style = styleOf(obStyle))
+        ob.lb := label.new(bar_index + lineLength, ob.lvl,
+             d == -1 ? (ob.isCisd ? "-CISD" : ob.isPb ? "-PB" : "-OB") : (ob.isCisd ? "+CISD" : ob.isPb ? "+PB" : "+OB"),
+             color = color.new(color.white, 100),
+             textcolor = d == -1 ? obBearCol : obBullCol,
+             style = label.style_label_left, size = size.small)
+        keepL(ob.obLn)
+        keepB(ob.lb)
+// Release the pool at session reset WITHOUT deleting the drawings. Under
+// retention the pruner owns every object's lifetime; deleting here would wipe
+// the previous session the moment a new one starts, whatever the input says.
+// killObDraw still deletes when a block dies mid-session — that is a level
+// going away on its own merits, not a session ending.
+wipeObs(array<Ob> arr) =>
+    array.clear(arr)
+// Retest glyph offset: a fraction of the liquidity range, so the arrow
+// floats clear of the wick tip (▲ below the low, ▼ above the high)
+// instead of rendering centered on the candle.
+rtOff() =>
+    r = na(liqHigh) or na(liqLow) ? float(na) : liqHigh - liqLow
+    na(r) or r <= 0 ? syminfo.mintick * 8 : r * RT_OFF_PCT
+fireAlert(bool on, string msg) =>
+    if on
+        alert(msg + " [" + curTag + "]", alert.freq_once_per_bar_close)
+// ─── Liquidity session: tracking, reset, close hook ──────────────────────
+if (inLiq and not inLiq[1]) or (datedFirst and inLiq)   // a liquidity session begins: full reset.
+    // Count this dealing range and retire anything older than the retention
+    // window. Drawings are no longer deleted here — they are pruned by age.
+    sessSeq := sessSeq + 1
+    pruneDrawings()
+    liqHigh := high
+    liqLow  := low
+    liqHiBar := bar_index
+    liqLoBar := bar_index
+    liqStartBar := bar_index
+    liqStartTime := time
+    liqClosed  := false
+    eqLvl      := na
+    dirState   := 0
+    cisdLvl    := na
+    cisdSwBar  := na
+    usedRaid   := na
+    cisdBlkLo  := na
+    cisdBlkHi  := na
+    sweepHiUp  := na
+    sweepLoDn  := na
+    loState    := 0
+    hiState    := 0
+    loCnt      := 0
+    hiCnt      := 0
+    killedOnce := false
+    swState    := 0
+    gapLo      := false
+    gapHi      := false
+    haltLo     := na
+    haltHi     := na
+    line.delete(swLvlLn)
+    label.delete(swLvlLb)
+    swLvlLn    := na
+    swLvlLb    := na
+    sweptHi    := false
+    sweptLo    := false
+    raidHi     := na
+    raidLo     := na
+    raidHiBar  := na
+    raidLoBar  := na
+    ewStartBar := na
+    eStage     := 0
+    eDir       := 0
+    eMsg       := ""
+    eMssLn  := na
+    eMssLb  := na
+    eRtLb   := na
+    eEnLb   := na
+    eSlLb   := na
+    eTpLb   := na
+    eVLn    := na
+    eVLnS   := na
+    aState  := 0
+    bState  := 0
+    ePath   := 0
+    eRound  := 1
+    array.clear(zkFar)
+    array.clear(zkCnt)
+    array.clear(zkBx)
+    array.clear(zkLb)
+    array.clear(zkCe)
+    aBx := na
+    aLb := na
+    aCe := na
+    aChainEnd := na
+    bBx := na
+    bLb := na
+    bCe := na
+    deliveryDone := false
+    // A kill flagged after delivery would otherwise reach the next session.
+    structKillUp := false
+    structKillDn := false
+    activeIdx   := -1
+    swHiBar := na
+    swLoBar := na
+    array.clear(fibLn)
+    array.clear(fibLb)
+    array.clear(fibVb)
+    fibBandBox := na
+    array.clear(pUpLvl)
+    array.clear(pUpBar)
+    array.clear(pUpSw)
+    array.clear(pUpProt)
+    array.clear(pDnLvl)
+    array.clear(pDnBar)
+    array.clear(pDnSw)
+    array.clear(pDnProt)
+    wipeObs(bearObs)
+    wipeObs(bullObs)
+else if inLiq and cmeOpen
+    if high > liqHigh
+        liqHigh := high
+        liqHiBar := bar_index
+    if low < liqLow
+        liqLow  := low
+        liqLoBar := bar_index
+// Swept level (v7.17): live only for the latest DR, one that started within
+// the last day, so an old level never reaches back into history.
+bool swLatest = sweptOn and sweptLvl > 0 and (datedLive or (not na(liqStartTime) and liqStartTime + 86400000 > last_bar_time))
+// v1.02: candles the CME clock skips. Price beyond the DR while CME was closed
+// (DR still forming, or in the EW) is not a sweep on the futures clock and is
+// not part of the DR; the Clock row says so.
+if barstate.isconfirmed and onCmeClock and cmeClockOn and not cmeOpen and (inLiq or (liqClosed and inExec)) and not na(liqLow)
+    if low < liqLow
+        haltLo := na(haltLo) ? low : math.min(haltLo, low)
+    if high > liqHigh
+        haltHi := na(haltHi) ? high : math.max(haltHi, high)
+// Dealing range ends: freeze the high, low and EQ, and draw them. These
+// levels are fixed for the rest of the session.
+if inLiq[1] and not inLiq and not na(liqHigh)
+    liqClosed := true
+    eqLvl := (liqHigh + liqLow) / 2
+    // Swept level: the DR's own extreme took the level you marked, so that
+    // side is swept already and the DR extreme is the raid extreme.
+    if swLatest
+        if sweptLvl < eqLvl and liqLow < sweptLvl
+            sweptLo   := true
+            raidLo    := liqLow
+            raidLoBar := liqLoBar
+            swState   := 1
+        else if sweptLvl >= eqLvl and liqHigh > sweptLvl
+            sweptHi   := true
+            raidHi    := liqHigh
+            raidHiBar := liqHiBar
+            swState   := 2
+        else
+            swState   := sweptLvl < eqLvl ? 3 : 4
+        // v1.02: the level on the chart, so a wrong entry shows at a glance.
+        swLvlLn := line.new(math.max(liqStartBar, bar_index - 4500), sweptLvl, bar_index, sweptLvl,
+             color = color.new(#787b86, 0), style = line.style_dotted, width = 1)
+        swLvlLb := label.new(math.max(liqStartBar, bar_index - 4500), sweptLvl, "Swept level " + fmtP(sweptLvl),
+             style = label.style_label_lower_left, color = color.new(#787b86, 100), textcolor = color.new(#787b86, 0), size = size.tiny)
+    // Fib retracement across the dealing range. The extreme that formed FIRST
+    // carries 1, the later extreme carries 0 — so a range that made its low
+    // first reads 0 at the high, and the ratios descend into the range.
+    if fibOn
+        float fA1 = liqLoBar <= liqHiBar ? liqLow  : liqHigh   // the 1 anchor
+        float fA0 = liqLoBar <= liqHiBar ? liqHigh : liqLow    // the 0 anchor
+        array<float> fLv = array.new<float>()
+        if fLv1On
+            array.push(fLv, fLv1)
+        if fLv2On
+            array.push(fLv, fLv2)
+        if fLv3On
+            array.push(fLv, fLv3)
+        if fLv4On
+            array.push(fLv, fLv4)
+        if fLv5On
+            array.push(fLv, fLv5)
+        if fLv6On
+            array.push(fLv, fLv6)
+        if fLv7On
+            array.push(fLv, fLv7)
+        if fLv8On
+            array.push(fLv, fLv8)
+        if array.size(fLv) > 0
+            for i = 0 to array.size(fLv) - 1
+                float r  = array.get(fLv, i)
+                float px = fA0 + r * (fA1 - fA0)
+                line fl = line.new(bar_index, px, bar_index, px,
+                     color = fibCol, width = fibWidth, style = styleOf(fibStyle))
+                array.push(fibLn, fl)
+                keepL(fl)
+                label fb = label.new(bar_index + NAME_OFF, px,
+                     str.tostring(r, "0.###"),
+                     color = color.new(color.white, 100), textcolor = fibCol,
+                     style = label.style_label_left, size = size.small)
+                array.push(fibLb, fb)
+                keepB(fb)
+                if fibValOn
+                    label fv = label.new(bar_index + VAL_OFF, px, fmtP(px),
+                         color = color.new(color.white, 100), textcolor = fibValCol,
+                         style = label.style_label_left, size = size.small)
+                    array.push(fibVb, fv)
+                    keepB(fv)
+        // The band uses the same anchors, so it sits in the same orientation as
+        // the ratios around it. math.min/max means the two inputs can be given
+        // in either order.
+        if fBandOn
+            float bp1 = fA0 + fBandLo * (fA1 - fA0)
+            float bp2 = fA0 + fBandHi * (fA1 - fA0)
+            fibBandBox := box.new(bar_index, math.max(bp1, bp2), bar_index, math.min(bp1, bp2),
+                 border_color = na, bgcolor = fBandCol)
+            keepX(fibBandBox)
+    if eqOn
+        eqLn := line.new(bar_index, eqLvl, bar_index, eqLvl,
+             color = eqCol, width = eqWidth, style = styleOf(eqStyle))
+        keepL(eqLn)
+        eqNameLb := label.new(bar_index + NAME_OFF, eqLvl, "EQ",
+             color = color.new(color.white, 100), textcolor = eqCol,
+             style = label.style_label_left, size = size.small)
+        keepB(eqNameLb)
+    if eqValOn
+        eqValLb := label.new(bar_index + VAL_OFF, eqLvl, fmtP(eqLvl),
+             color = color.new(color.white, 100), textcolor = eqValCol,
+             style = label.style_label_left, size = size.small)
+        keepB(eqValLb)
+    if liqHiTxtOn
+        liqHiLn := line.new(liqStartBar, liqHigh, bar_index, liqHigh,
+             color = liqHiCol, width = liqHiWidth)
+        keepL(liqHiLn)
+        liqHiNameLb := label.new(bar_index + NAME_OFF, liqHigh, liqHiTxt,
+             color = color.new(color.white, 100), textcolor = liqHiCol,
+             style = label.style_label_left, size = size.small)
+        keepB(liqHiNameLb)
+    if liqLoTxtOn
+        liqLoLn := line.new(liqStartBar, liqLow, bar_index, liqLow,
+             color = liqLoCol, width = liqLoWidth)
+        keepL(liqLoLn)
+        liqLoNameLb := label.new(bar_index + NAME_OFF, liqLow, liqLoTxt,
+             color = color.new(color.white, 100), textcolor = liqLoCol,
+             style = label.style_label_left, size = size.small)
+        keepB(liqLoNameLb)
+    if liqValOn
+        liqHiValLb := label.new(bar_index + VAL_OFF, liqHigh, fmtP(liqHigh),
+             color = color.new(color.white, 100), textcolor = liqValCol,
+             style = label.style_label_left, size = size.small)
+        keepB(liqHiValLb)
+        liqLoValLb := label.new(bar_index + VAL_OFF, liqLow, fmtP(liqLow),
+             color = color.new(color.white, 100), textcolor = liqValCol,
+             style = label.style_label_left, size = size.small)
+        keepB(liqLoValLb)
+// ─── Sweep detection: wick through the frozen liquidity levels ──────────
+if inExec and cmeOpen and not na(liqHigh)
+    if high > liqHigh
+        sweptHi := true
+        sweepLoDn := na(sweepLoDn) ? low : math.min(sweepLoDn, low)
+    if low < liqLow
+        sweptLo := true
+        sweepHiUp := na(sweepHiUp) ? high : math.max(sweepHiUp, high)
+// Running extremes since the dealing range closed: the raid's own reach. The
+// raid-extreme kill and the MSS reference read them.
+// v1.02: a reopen candle, the first valid one after the daily halt or the
+// weekend (closed-hours candles on a clocked perp, or a missing stretch on a
+// futures chart).
+bool brkBar = cmeOpen and (not cmeOpen[1] or time - time[1] > timeframe.in_seconds() * 1500)
+if inExec and cmeOpen and liqClosed
+    if na(raidHi) or high > raidHi
+        raidHiBar := bar_index
+        gapHi     := brkBar and not na(pvClose) and open > pvClose
+    if na(raidLo) or low < raidLo
+        raidLoBar := bar_index
+        gapLo     := brkBar and not na(pvClose) and open < pvClose
+    raidHi := na(raidHi) ? high : math.max(raidHi, high)
+    raidLo := na(raidLo) ? low  : math.min(raidLo, low)
+// ─── Delivery complete ───────────────────────────────────────────────────
+// The setup's target is the far end of the dealing range. Once price reaches
+// it the session has done its job, and anything the engine finds afterwards
+// is a new idea the model was never built to express. Freeze here rather
+// than let it keep hunting — a post-delivery signal reads as a broken
+// indicator, not as a second trade.
+//
+// This runs ahead of the Confirmation section, so dirState is still 0 on the
+// bar a CISD confirms. That is deliberate: a session whose target was already
+// behind price at confirmation time must not terminate itself instantly.
+if terminateOn and inExec and cmeOpen and liqClosed and dirState != 0 and not deliveryDone
+    bool hitTarget = dirState == -1 ? low <= liqLow : high >= liqHigh
+    if hitTarget
+        deliveryDone := true
+        if terminateMark
+            keepB(label.new(bar_index, dirState == -1 ? liqLow : liqHigh,
+                 "✓", style = dirState == -1 ? label.style_label_up : label.style_label_down,
+                 color = color.new(color.gray, 60), textcolor = color.white,
+                 size = size.tiny,
+                 tooltip = "Delivery complete — target reached, EW frozen"))
+// ─── Session boxes ────────────────────────────────────────────────────────
+var box liqBox  = na
+var box execBox = na
+if showLiqBox
+    if (inLiq and not inLiq[1]) or (datedFirst and inLiq)
+        liqBox := box.new(bar_index, high, bar_index, low,
+             border_color = na,
+             bgcolor      = sesLiqCol,
+             text         = showBoxTxt ? "DR" : "",
+             text_color   = color.new(sesLiqCol, txtTransp),
+             text_size    = sizeOf(boxTxtSize),
+             text_halign  = text.align_center,
+             text_valign  = text.align_center)
+        keepX(liqBox)
+    else if inLiq and not na(liqBox)
+        box.set_top(liqBox, liqHigh)
+        box.set_bottom(liqBox, liqLow)
+        box.set_right(liqBox, bar_index)
+if showExecBox
+    if inExec and not inExec[1]
+        execBox := box.new(bar_index, high, bar_index, low,
+             border_color = na,
+             bgcolor      = sesExecCol,
+             text         = showBoxTxt ? "EW" : "",
+             text_color   = color.new(sesExecCol, txtTransp),
+             text_size    = sizeOf(boxTxtSize),
+             text_halign  = text.align_center,
+             text_valign  = text.align_center)
+        keepX(execBox)
+    else if inExec and cmeOpen and not na(execBox)
+        box.set_top(execBox, math.max(box.get_top(execBox), high))
+        box.set_bottom(execBox, math.min(box.get_bottom(execBox), low))
+        box.set_right(execBox, bar_index)
+// ─── EW start ────────────────────────────────────────────────────────────
+// CISD, OB and PB live inside the execution window. Record its first bar once
+// per DR cycle; the DR reset clears it.
+if inExec and cmeOpen and liqClosed and na(ewStartBar)
+    ewStartBar := bar_index
+// ─── Swing structure ─────────────────────────────────────────────────────
+// Pivots, left 2 / right 2 — the same detection his Trend Direction & Swing
+// Points indicator uses. This is the ONLY structural machinery in the model.
+// Swing = strictly higher (lower) than the two candles either side. A tie is
+// not a swing: 2 Oct XYZ100, 11:01 and 11:02 both printed 30,914, and counting
+// the tie made a -OB nobody would mark.
+// The five candles are the last five CME-valid ones (v7.20). On a clocked perp
+// a swing next to the halt or the weekend is judged against the candles the
+// futures chart prints; everywhere else these are simply the last five bars.
+float vH0 = ta.valuewhen(cmeOpen, high, 0)
+float vH1 = ta.valuewhen(cmeOpen, high, 1)
+float vH2 = ta.valuewhen(cmeOpen, high, 2)
+float vH3 = ta.valuewhen(cmeOpen, high, 3)
+float vH4 = ta.valuewhen(cmeOpen, high, 4)
+float vL0 = ta.valuewhen(cmeOpen, low, 0)
+float vL1 = ta.valuewhen(cmeOpen, low, 1)
+float vL2 = ta.valuewhen(cmeOpen, low, 2)
+float vL3 = ta.valuewhen(cmeOpen, low, 3)
+float vL4 = ta.valuewhen(cmeOpen, low, 4)
+int   vB1 = ta.valuewhen(cmeOpen, bar_index, 1)   // previous valid candle
+int   vB2 = ta.valuewhen(cmeOpen, bar_index, 2)   // the pivot candle
+float phNow = vH2 > vH3 and vH2 > vH4 and vH2 > vH1 and vH2 > vH0 ? vH2 : float(na)
+float plNow = vL2 < vL3 and vL2 < vL4 and vL2 < vL1 and vL2 < vL0 ? vL2 : float(na)
+// ─── CME-valid candle sequence (v7.20) ───────────────────────────────────
+// Every bar scan below skips closed-hours candles, and a three-candle gap is
+// read across the next VALID candles. Without the clock every candle is valid
+// and these reduce to plain bar arithmetic.
+// Bar of the valid candle before bar b (na beyond 500 candles back).
+openBefore(int b) =>
+    int q = bar_index - b + 1
+    while q <= 500 and not cmeOpen[q]
+        q += 1
+    q <= 500 ? bar_index - q : int(na)
+// Valid candles after bar a, up to and including bar c.
+openCount(int a, int c) =>
+    int n = 0
+    if not na(a) and not na(c) and c > a
+        int lo = math.max(a + 1, bar_index - 500)
+        if c >= lo
+            for b = lo to c
+                n += cmeOpen[bar_index - b] ? 1 : 0
+    n
+// v7.24: the run into the raid extreme. Consecutive bearish candles (d = 1) or
+// bullish candles (d = -1) ending at the raid-extreme candle, or at the candle
+// before it when the raid candle itself is not part of the run. A doji or an
+// opposite candle ends the run; closed-hours candles are stepped over.
+// v7.26: when no run candle opened inside the DR (edge = DR low for d = 1, DR
+// high for d = -1), the walk continues back through candles whose whole body
+// sits beyond the edge, and takes the run candle that opened inside the DR.
+// Candles fully outside the range are part of the raid, not a break in it.
+// Returns [first bar, last bar, body low, body high]; na when there is no run.
+runInto(int d, int rb, float edge) =>
+    // One backward walk in stages (v7.27 rewrite of the v7.26 walk-back):
+    // 0 = the run (same-direction candles); 1 = no run candle opened inside
+    // the DR yet, so step over candles whose whole body sits beyond the edge;
+    // 2 = done. Bodies passed in stage 1 join the run only if the walk ends on
+    // a same-direction candle that opened inside the DR.
+    int   fB = na
+    int   lB = na
+    float rL = na
+    float rH = na
+    bool  inDR = false
+    int   stg  = 0
+    float tL = na
+    float tH = na
+    int   k  = na
+    if not na(rb) and bar_index - rb <= 500
+        int q0 = bar_index - rb
+        k := (d == 1 ? close[q0] < open[q0] : close[q0] > open[q0]) ? rb : openBefore(rb)
+    while not na(k) and stg < 2
+        int   o    = bar_index - k
+        float bLo  = math.min(open[o], close[o])
+        float bHi  = math.max(open[o], close[o])
+        bool  same = d == 1 ? close[o] < open[o] : close[o] > open[o]
+        bool  opIn = na(edge) ? true : (d == 1 ? open[o] >= edge : open[o] <= edge)
+        bool  outB = na(edge) ? false : (d == 1 ? bHi < edge : bLo > edge)
+        if stg == 0
+            if same
+                lB := na(lB) ? k : lB
+                fB := k
+                inDR := inDR or opIn
+                rL := na(rL) ? bLo : math.min(rL, bLo)
+                rH := na(rH) ? bHi : math.max(rH, bHi)
+            else
+                stg := na(fB) or inDR or na(edge) ? 2 : 1
+        if stg == 1
+            if outB
+                tL := na(tL) ? bLo : math.min(tL, bLo)
+                tH := na(tH) ? bHi : math.max(tH, bHi)
+            else
+                if same and opIn
+                    fB := k
+                    rL := math.min(rL, nz(tL, bLo), bLo)
+                    rH := math.max(rH, nz(tH, bHi), bHi)
+                stg := 2
+        if stg < 2
+            k := k <= bar_index - 500 ? int(na) : openBefore(k)
+    [fB, lB, rL, rH]
+// v7.25: the run candle a close takes as the CISD: the CLOSEST one. For a
+// +CISD, the highest open still below the close (and at or above the DR low);
+// for a -CISD, the lowest open still above it (at or below the DR high). On a
+// tie the earlier candle wins. Returns [bar, block low, block high]; the block
+// runs from that candle to the end of the run, over the bodies. na if none.
+cisdPick(int d, int fB, int lB, float px, float edge) =>
+    int   pB = na
+    float pO = na
+    int   b  = lB
+    while not na(b)
+        int   o  = bar_index - b
+        float op = open[o]
+        bool  ok = d == 1 ? (op < px and op >= edge) : (op > px and op <= edge)
+        if ok and (na(pO) or (d == 1 ? op >= pO : op <= pO))
+            pB := b
+            pO := op
+        b := b <= fB ? int(na) : openBefore(b)
+    float kLo = na
+    float kHi = na
+    if not na(pB)
+        int b2 = lB
+        while not na(b2)
+            int o2 = bar_index - b2
+            kLo := na(kLo) ? math.min(open[o2], close[o2]) : math.min(kLo, open[o2], close[o2])
+            kHi := na(kHi) ? math.max(open[o2], close[o2]) : math.max(kHi, open[o2], close[o2])
+            b2 := b2 <= pB ? int(na) : openBefore(b2)
+    [pB, kLo, kHi]
+// ─── Gap sweep (v1.02) ───────────────────────────────────────────────────
+// A sweep made by the reopen gap has no candle leading into it. The CISD then
+// comes from the run into the DR's own extreme (the exception already allowed
+// for the CISD), picked the v7.25 way. The run is kept as values when the DR
+// extreme forms, so it still reads after a weekend has pushed it past the
+// 500-candle scans on 1m-5m.
+var array<float> gUpO = array.new_float()
+var array<float> gUpC = array.new_float()
+var array<int>   gUpB = array.new_int()
+var array<int>   gUpT = array.new_int()
+var array<float> gDnO = array.new_float()
+var array<float> gDnC = array.new_float()
+var array<int>   gDnB = array.new_int()
+var array<int>   gDnT = array.new_int()
+snapRun(int d, int rb, float edge, array<float> oA, array<float> cA, array<int> bA, array<int> tA) =>
+    array.clear(oA)
+    array.clear(cA)
+    array.clear(bA)
+    array.clear(tA)
+    [sF, sL, sLo, sHi] = runInto(d, rb, edge)
+    if not na(sF)
+        int b = sL
+        while not na(b)
+            int o = bar_index - b
+            array.unshift(oA, open[o])
+            array.unshift(cA, close[o])
+            array.unshift(bA, b)
+            array.unshift(tA, time[o])
+            b := b <= sF ? int(na) : openBefore(b)
+    0
+if barOK and inLiq and liqLoBar == bar_index
+    snapRun(1, liqLoBar, liqLow, gUpO, gUpC, gUpB, gUpT)
+if barOK and inLiq and liqHiBar == bar_index
+    snapRun(-1, liqHiBar, liqHigh, gDnO, gDnC, gDnB, gDnT)
+// The run candle a close takes as the CISD (v7.25 rule on the kept run): for a
+// +CISD the highest open still below the close and at or above the DR low; the
+// earlier candle wins a tie. Returns [index, block low, block high]; -1 if none.
+gapPick(int d, array<float> oA, array<float> cA, float px, float edge) =>
+    int   idx  = -1
+    float best = na
+    int   n    = array.size(oA)
+    if n > 0
+        for i = 0 to n - 1
+            float op = array.get(oA, i)
+            bool  ok = d == 1 ? (op < px and op >= edge) : (op > px and op <= edge)
+            if ok and (na(best) or (d == 1 ? op > best : op < best))
+                idx  := i
+                best := op
+    float kLo = na
+    float kHi = na
+    if idx >= 0
+        for j = idx to n - 1
+            float o2 = array.get(oA, j)
+            float c2 = array.get(cA, j)
+            kLo := na(kLo) ? math.min(o2, c2) : math.min(kLo, o2, c2)
+            kHi := na(kHi) ? math.max(o2, c2) : math.max(kHi, o2, c2)
+    [idx, kLo, kHi]
+// Far body edge of the whole kept run: the highest body for a +CISD run, the
+// lowest for a -CISD run (a close beyond it accepts, as in the normal hunt).
+runEdge(int d, array<float> oA, array<float> cA) =>
+    float e = na
+    int   n = array.size(oA)
+    if n > 0
+        for i = 0 to n - 1
+            float hb = math.max(array.get(oA, i), array.get(cA, i))
+            float lb = math.min(array.get(oA, i), array.get(cA, i))
+            e := d == 1 ? (na(e) ? hb : math.max(e, hb)) : (na(e) ? lb : math.min(e, lb))
+    e
+// Nearest run open on the side that still needs a close.
+runNear(int d, array<float> oA, float edge) =>
+    float e = na
+    int   n = array.size(oA)
+    if n > 0
+        for i = 0 to n - 1
+            float op = array.get(oA, i)
+            if d == 1 ? op >= edge : op <= edge
+                e := na(e) ? op : d == 1 ? math.min(e, op) : math.max(e, op)
+    e
+// v1.02: the stop candle. The stop sits beyond the zone's first candle (v7.18),
+// unless that candle is the raid extreme itself: then it goes beyond the next
+// valid candle (the displacement candle), not at the sweep's extreme.
+stopFrom(int d, int s, float entry) =>
+    float sp = d == -1 ? high[bar_index - s] : low[bar_index - s]
+    if s == eRaidBar
+        int s2 = s + 1
+        while s2 < bar_index and not cmeOpen[bar_index - s2]
+            s2 += 1
+        if s2 < bar_index
+            float s2p = d == -1 ? high[bar_index - s2] : low[bar_index - s2]
+            if d == -1 ? s2p > entry : s2p < entry
+                sp := s2p
+    sp
+// ─── Block formation (OB / PB) ───────────────────────────────────────────
+// Since v7.24 the CISD is not built here: it comes from the run into the raid
+// extreme (Confirmation). A confirmed swing closes a leg and queues one pending
+// OB on the side the held state trades: swing lows under a bullish CISD, swing
+// highs under a bearish one. Every swing is registered either way (the MSS
+// reads them).
+if barOK
+    // ── a swing LOW confirms ──
+    if not na(plNow)
+        // A pending block dies on a lower swing low than its own.
+        if array.size(pUpProt) > 0
+            for j = array.size(pUpProt) - 1 to 0
+                if plNow < array.get(pUpProt, j)
+                    array.remove(pUpLvl, j)
+                    array.remove(pUpBar, j)
+                    array.remove(pUpSw, j)
+                    array.remove(pUpProt, j)
+        int loBar = vB2
+        // The leg runs from the previous swing high to this low, inside the EW.
+        int legUp = swHiBar
+        if dirState == 1 and not na(legUp) and legUp < loBar and not na(ewStartBar) and loBar >= ewStartBar
+            // ANCHOR: the first down-close candle of the leg, counting from the
+            // swing candle itself, whose open is at or above the swept DR low.
+            int aBar = na
+            for b = math.max(legUp, ewStartBar) to loBar
+                int off = bar_index - b
+                if off >= 0 and off <= 500 and cmeOpen[off] and close[off] < open[off] and (na(liqLow) or open[off] >= liqLow)
+                    aBar := b
+                    break
+            // Several swings share one leg: keep one pending block per anchor.
+            bool dupUp = false
+            if not na(aBar) and array.size(pUpBar) > 0
+                for j = 0 to array.size(pUpBar) - 1
+                    if array.get(pUpBar, j) == aBar
+                        dupUp := true
+                        if plNow < array.get(pUpProt, j)
+                            array.set(pUpSw, j, loBar)
+                        array.set(pUpProt, j, math.min(array.get(pUpProt, j), plNow))
+            if not na(aBar) and not dupUp
+                // Every down-close candle of the leg is a candidate; the pending
+                // level is the LOWEST candidate open. Which candidate the OB takes
+                // is settled on the close that confirms it.
+                float nLvl = open[bar_index - aBar]
+                if aBar <= loBar - 1
+                    for b = aBar to loBar - 1
+                        int oc = bar_index - b
+                        if oc >= 0 and oc <= 500 and cmeOpen[oc] and close[oc] < open[oc] and (na(liqLow) or open[oc] >= liqLow)
+                            nLvl := math.min(nLvl, open[oc])
+                array.push(pUpLvl, nLvl)
+                array.push(pUpBar, aBar)
+                array.push(pUpSw, loBar)
+                array.push(pUpProt, plNow)
+                while array.size(pUpLvl) > 12
+                    array.shift(pUpLvl)
+                    array.shift(pUpBar)
+                    array.shift(pUpSw)
+                    array.shift(pUpProt)
+        swLoBar := loBar
+        array.push(slBarA, loBar)
+        array.push(slPxA, plNow)
+        if array.size(slBarA) > 50
+            array.shift(slBarA)
+            array.shift(slPxA)
+    // ── a swing HIGH confirms (mirror) ──
+    if not na(phNow)
+        if array.size(pDnProt) > 0
+            for j = array.size(pDnProt) - 1 to 0
+                if phNow > array.get(pDnProt, j)
+                    array.remove(pDnLvl, j)
+                    array.remove(pDnBar, j)
+                    array.remove(pDnSw, j)
+                    array.remove(pDnProt, j)
+        int hiBar = vB2
+        int legDn = swLoBar
+        if dirState == -1 and not na(legDn) and legDn < hiBar and not na(ewStartBar) and hiBar >= ewStartBar
+            int aBar2 = na
+            for b = math.max(legDn, ewStartBar) to hiBar
+                int off3 = bar_index - b
+                if off3 >= 0 and off3 <= 500 and cmeOpen[off3] and close[off3] > open[off3] and (na(liqHigh) or open[off3] <= liqHigh)
+                    aBar2 := b
+                    break
+            bool dupDn = false
+            if not na(aBar2) and array.size(pDnBar) > 0
+                for j = 0 to array.size(pDnBar) - 1
+                    if array.get(pDnBar, j) == aBar2
+                        dupDn := true
+                        if phNow > array.get(pDnProt, j)
+                            array.set(pDnSw, j, hiBar)
+                        array.set(pDnProt, j, math.max(array.get(pDnProt, j), phNow))
+            if not na(aBar2) and not dupDn
+                float mLvl = open[bar_index - aBar2]
+                if aBar2 <= hiBar - 1
+                    for b = aBar2 to hiBar - 1
+                        int oc2 = bar_index - b
+                        if oc2 >= 0 and oc2 <= 500 and cmeOpen[oc2] and close[oc2] > open[oc2] and (na(liqHigh) or open[oc2] <= liqHigh)
+                            mLvl := math.max(mLvl, open[oc2])
+                array.push(pDnLvl, mLvl)
+                array.push(pDnBar, aBar2)
+                array.push(pDnSw, hiBar)
+                array.push(pDnProt, phNow)
+                while array.size(pDnLvl) > 12
+                    array.shift(pDnLvl)
+                    array.shift(pDnBar)
+                    array.shift(pDnSw)
+                    array.shift(pDnProt)
+        swHiBar := hiBar
+        array.push(shBarA, hiBar)
+        array.push(shPxA, phNow)
+        if array.size(shBarA) > 50
+            array.shift(shBarA)
+            array.shift(shPxA)
+// ─── DR levels (v7.25) ───────────────────────────────────────────────────
+// Each side of the DR is a PD array of its own. Two consecutive body closes
+// beyond it: that side waits for price to close back inside the DR before a
+// CISD can form on it again. One body close beyond it by a quarter of the DR's
+// length: the reversal on that side is off for this DR (define a new one), and
+// a CISD held on that side dies.
+if barOK and inExec and liqClosed and not na(liqLow) and not na(liqHigh)
+    float drQ = 0.25 * (liqHigh - liqLow)
+    if loState != 2
+        if close < liqLow - drQ
+            loState := 2
+            if dirState == 1
+                structKillUp := true
+                killWhy := "expanded a quarter of the DR below the DR low " + fmtP(liqLow)
+        else
+            loCnt := close < liqLow ? loCnt + 1 : 0
+            if loState == 0 and loCnt >= killCloses
+                loState := 1
+            else if loState == 1 and close > liqLow
+                loState := 0
+                loCnt   := 0
+    if hiState != 2
+        if close > liqHigh + drQ
+            hiState := 2
+            if dirState == -1
+                structKillDn := true
+                killWhy := "expanded a quarter of the DR above the DR high " + fmtP(liqHigh)
+        else
+            hiCnt := close > liqHigh ? hiCnt + 1 : 0
+            if hiState == 0 and hiCnt >= killCloses
+                hiState := 1
+            else if hiState == 1 and close < liqHigh
+                hiState := 0
+                hiCnt   := 0
+// ─── Confirmation ────────────────────────────────────────────────────────
+// CISD: while hunting, only the run into the raid extreme counts. It is
+// accepted on the first body close above the sweep (the highs of every candle
+// that traded beyond the DR level) or above the whole run (v7.25). The CISD is
+// the run candle closest below that close. A lower low before acceptance
+// re-reads the run from the new extreme. A raid extreme that already carried a
+// CISD cannot carry another: after a kill, a new CISD needs a new extreme.
+// Once a state is held, pending blocks confirm as OBs: a close through the
+// pending level that advances past the highest living block on its side.
+if barOK and inExec and not deliveryDone
+    bool cisdNew = false
+    // v7.26: the status line shows what the hunt is reading on each side, so a
+    // missing CISD can be traced to the run, the close it needs, or the gate.
+    huntUp := dirState != 0 or not sweptLo ? "" : loState != 0 ? "" : raidLoBar == nz(usedRaid, -1) ? "Sweep used" : ""
+    huntDn := dirState != 0 or not sweptHi ? "" : hiState != 0 ? "" : raidHiBar == nz(usedRaid, -1) ? "Sweep used" : ""
+    if dirState == 0 and loState == 0 and sweptLo and not na(raidLoBar) and raidLoBar != nz(usedRaid, -1) and not na(liqLow)
+        [cF, cL, cLo, cHi] = runInto(1, raidLoBar, liqLow)
+        // Accepted by a body close above the sweep (the highs of every candle
+        // that traded below the DR low), or above the whole run.
+        int   rOfU  = bar_index - raidLoBar
+        float rHiU  = rOfU <= 500 ? high[math.min(rOfU, 500)] : float(na)
+        float swTop = na(sweepHiUp) ? rHiU : math.max(sweepHiUp, nz(rHiU, sweepHiUp))
+        // On a gap sweep the gap is the leg into the sweep; candles before the
+        // close (the drift into the halt) are not, so the DR-low run decides.
+        bool gUp = gapLo and array.size(gUpO) > 0
+        huntUp := gUp ? "Close > " + fmtP(runNear(1, gUpO, liqLow)) : na(cF) ? "No leg into sweep" : "Close > " + fmtP(math.min(nz(swTop, cHi), cHi))
+        if not gUp and not na(cF) and bar_index > cL and close > liqLow and (close > swTop or close > cHi)
+            [pB, pLo, pHi] = cisdPick(1, cF, cL, close, liqLow)
+            if not na(pB)
+                int   cOf = bar_index - pB
+                float cLv = open[cOf]
+                Ob nb = Ob.new(cLv, (open[cOf] + close[cOf]) / 2, pB)
+                cLo := pLo
+                cHi := pHi
+                nb.bLo := cLo
+                nb.bHi := cHi
+                nb.isCisd := true
+                array.push(bullObs, nb)
+                dirState  := 1
+                cisdLvl   := cLv
+                cisdBlkLo := cLo
+                cisdBlkHi := cHi
+                cisdSwBar := raidLoBar
+                usedRaid  := raidLoBar
+                sweepHiUp := na
+                cisdNew   := true
+                fireAlert(alCS, "Bullish CISD formed — " + fmtP(cLv))
+        // v1.02 gap sweep: the reopen candle may accept with its own close.
+        if gUp and close > liqLow and (bar_index == raidLoBar or close > swTop or close > runEdge(1, gUpO, gUpC))
+            [gi, gLo, gHi] = gapPick(1, gUpO, gUpC, close, liqLow)
+            if gi >= 0
+                float gLv = array.get(gUpO, gi)
+                Ob gCisd = Ob.new(gLv, (gLv + array.get(gUpC, gi)) / 2, array.get(gUpB, gi))
+                gCisd.bLo := gLo
+                gCisd.bHi := gHi
+                gCisd.isCisd := true
+                array.push(bullObs, gCisd)
+                dirState  := 1
+                cisdLvl   := gLv
+                cisdBlkLo := gLo
+                cisdBlkHi := gHi
+                cisdSwBar := raidLoBar
+                usedRaid  := raidLoBar
+                sweepHiUp := na
+                cisdNew   := true
+                fireAlert(alCS, "Bullish CISD formed — " + fmtP(gLv))
+    if dirState == 0 and hiState == 0 and sweptHi and not na(raidHiBar) and raidHiBar != nz(usedRaid, -1) and not na(liqHigh)
+        [dF, dL, dLo, dHi] = runInto(-1, raidHiBar, liqHigh)
+        int   rOfD  = bar_index - raidHiBar
+        float rLoD  = rOfD <= 500 ? low[math.min(rOfD, 500)] : float(na)
+        float swBot = na(sweepLoDn) ? rLoD : math.min(sweepLoDn, nz(rLoD, sweepLoDn))
+        bool gDn = gapHi and array.size(gDnO) > 0
+        huntDn := gDn ? "Close < " + fmtP(runNear(-1, gDnO, liqHigh)) : na(dF) ? "No leg into sweep" : "Close < " + fmtP(math.max(nz(swBot, dLo), dLo))
+        if not gDn and not na(dF) and bar_index > dL and close < liqHigh and (close < swBot or close < dLo)
+            [qB, qLo, qHi] = cisdPick(-1, dF, dL, close, liqHigh)
+            if not na(qB)
+                int   dOf0 = bar_index - qB
+                float dLv  = open[dOf0]
+                Ob nb2 = Ob.new(dLv, (open[dOf0] + close[dOf0]) / 2, qB)
+                dLo := qLo
+                dHi := qHi
+                nb2.bLo := dLo
+                nb2.bHi := dHi
+                nb2.isCisd := true
+                array.push(bearObs, nb2)
+                dirState  := -1
+                cisdLvl   := dLv
+                cisdBlkLo := dLo
+                cisdBlkHi := dHi
+                cisdSwBar := raidHiBar
+                usedRaid  := raidHiBar
+                sweepLoDn := na
+                cisdNew   := true
+                fireAlert(alCS, "Bearish CISD formed — " + fmtP(dLv))
+        // v1.02 gap sweep: the reopen candle may accept with its own close.
+        if gDn and close < liqHigh and (bar_index == raidHiBar or close < swBot or close < runEdge(-1, gDnO, gDnC))
+            [hi2, hLo, hHi] = gapPick(-1, gDnO, gDnC, close, liqHigh)
+            if hi2 >= 0
+                float hLv = array.get(gDnO, hi2)
+                Ob hCisd = Ob.new(hLv, (hLv + array.get(gDnC, hi2)) / 2, array.get(gDnB, hi2))
+                hCisd.bLo := hLo
+                hCisd.bHi := hHi
+                hCisd.isCisd := true
+                array.push(bearObs, hCisd)
+                dirState  := -1
+                cisdLvl   := hLv
+                cisdBlkLo := hLo
+                cisdBlkHi := hHi
+                cisdSwBar := raidHiBar
+                usedRaid  := raidHiBar
+                sweepLoDn := na
+                cisdNew   := true
+                fireAlert(alCS, "Bearish CISD formed — " + fmtP(hLv))
+    // A new CISD retires every older block on both sides and both pending
+    // queues: nothing built before the sweep leg can become its OB.
+    if cisdNew
+        Ob newC = dirState == 1 ? array.get(bullObs, array.size(bullObs) - 1) : array.get(bearObs, array.size(bearObs) - 1)
+        for side = 0 to 1
+            arrK = side == 0 ? bullObs : bearObs
+            if array.size(arrK) > 0
+                for j = 0 to array.size(arrK) - 1
+                    Ob pr = array.get(arrK, j)
+                    if not pr.dead and not (pr.isCisd and pr.bi == newC.bi and pr.lvl == newC.lvl)
+                        pr.dead := true
+                        killObDraw(pr)
+        activeIdx := -1
+        array.clear(pUpLvl)
+        array.clear(pUpBar)
+        array.clear(pUpSw)
+        array.clear(pUpProt)
+        array.clear(pDnLvl)
+        array.clear(pDnBar)
+        array.clear(pDnSw)
+        array.clear(pDnProt)
+    // ── bullish ──
+    // Scan the queue oldest-first and take the FIRST pending block this close
+    // confirms. Only one block prints per bar; the rest stay pending.
+    // Each block must ADVANCE past the highest living block on its side, not
+    // merely past the CISD. Comparing only to the CISD let two pending blocks
+    // with near-identical anchors both validate and draw two lines at the same
+    // price (21 Aug 1m, 11:20).
+    float topUp = cisdLvl
+    if array.size(bullObs) > 0
+        for j = 0 to array.size(bullObs) - 1
+            Ob tb = array.get(bullObs, j)
+            if not tb.dead and (na(topUp) or tb.lvl > topUp)
+                topUp := tb.lvl
+    if array.size(pUpLvl) > 0
+        int hit  = -1
+        int hitB = na
+        for j = 0 to array.size(pUpLvl) - 1
+            float lv = array.get(pUpLvl, j)   // lowest candidate open
+            int   bb = array.get(pUpBar, j)   // first candidate of the leg
+            int   sw = array.get(pUpSw, j)    // swing low the leg ends at
+            // v7.18: the level this close takes is the EARLIEST candidate of the
+            // leg whose open the close is above. The candle that made the low
+            // counts only when nothing else qualifies. Anchors stay at or above
+            // the swept DR low, as before.
+            int rb = na
+            if hit == -1 and close > lv and bar_index - bb <= 500
+                bool others = false
+                if sw - 1 >= bb
+                    for b = bb to sw - 1
+                        int oq = bar_index - b
+                        if cmeOpen[oq] and close[oq] < open[oq] and (na(liqLow) or open[oq] >= liqLow)
+                            others := true
+                            break
+                int endB = others ? sw - 1 : sw
+                for b = bb to endB
+                    int oq2 = bar_index - b
+                    if cmeOpen[oq2] and close[oq2] < open[oq2] and (na(liqLow) or open[oq2] >= liqLow) and close > open[oq2]
+                        rb := b
+                        break
+            float rl = na(rb) ? float(na) : open[bar_index - rb]
+            // An OB needs a bullish candle and must advance past the top block.
+            bool ok = dirState == 1 and not na(rb) and close > open and bar_index > rb and not na(ewStartBar) and rb >= ewStartBar and rl > topUp
+            if ok and hit == -1
+                hit  := j
+                hitB := rb
+        if hit != -1
+            int   uBar = hitB
+            int   uSw  = array.get(pUpSw, hit)
+            int   uOf  = bar_index - uBar
+            float uLvl = open[uOf]
+            float uLo  = math.min(open[uOf], close[uOf])
+            float uHi  = math.max(open[uOf], close[uOf])
+            float uMt  = (open[uOf] + close[uOf]) / 2
+            // block extent: the run of down-close candles from the anchor on
+            // (closed-hours candles are skipped, not counted)
+            int uRunR = 0
+            for b = uBar to uSw
+                int o5 = bar_index - b
+                if not cmeOpen[o5]
+                    continue
+                if close[o5] < open[o5]
+                    uLo := math.min(uLo, open[o5], close[o5])
+                    uHi := math.max(uHi, open[o5], close[o5])
+                    uRunR += 1
+                else
+                    break
+            Ob nb = Ob.new(uLvl, uMt, uBar)
+            nb.bLo := uLo
+            nb.bHi := uHi
+            // Propulsion block. All four must hold, or it is an ordinary OB:
+            //   1. the block is a SINGLE candle — a series is always an OB
+            //   2. its low traded INTO a living, non-PB parent's range
+            //   3. it did NOT close through that parent's mean threshold
+            //   4. it sits above the parent's level
+            // The rule was previously only 2 and 4, which labelled most blocks
+            // in a trend as +PB.
+            int uRun = uRunR
+            int uAOff = bar_index - uBar
+            float uClose = uAOff >= 0 and uAOff <= 500 ? close[uAOff] : na
+            // The parent is the MOST RECENT living non-PB block only. A later OB
+            // in the trend resets the cycle as a new standalone parent — testing
+            // against every older block let almost any pullback candle in a trend
+            // find some parent it qualified against, which is why +PB clustered.
+            // The parent is the most recent living non-PB block, spent or not.
+            // A spent parent (it already has its PB) blocks the PB; the search
+            // never falls back to an older OB.
+            int uPar = -1
+            if array.size(bullObs) > 0
+                for j = 0 to array.size(bullObs) - 1
+                    Ob pk = array.get(bullObs, j)
+                    if not pk.dead and not pk.isPb and pk.bi < uBar
+                        uPar := j
+            if dirState == 1 and uRun == 1 and uPar >= 0 and not array.get(bullObs, uPar).hasPb
+                Ob pp = array.get(bullObs, uPar)
+                if uLvl > pp.lvl and uLo <= pp.bHi and uLo >= pp.bLo and (na(pp.inv) or na(uClose) or uClose >= pp.inv)
+                    nb.isPb := true
+                    // One PB per parent. The block is spent — the next PB needs
+                    // a new OB, which is what "a later OB resets the cycle" means.
+                    pp.hasPb := true
+            // The PB keeps the block's bodies-only mean threshold, same as every
+            // other block. The earlier full-range (high-to-low) convention is
+            // dropped — one measurement across the whole model.
+            array.push(bullObs, nb)
+            fireAlert(alOB, (nb.isPb ? "+PB" : "+OB") + " formed — " + fmtP(nb.lvl))
+            // retire this block and everything older than it
+            for j = hit to 0
+                array.remove(pUpLvl, j)
+                array.remove(pUpBar, j)
+                array.remove(pUpSw, j)
+                array.remove(pUpProt, j)
+    // ── bearish ──
+    float topDn = cisdLvl
+    if array.size(bearObs) > 0
+        for j = 0 to array.size(bearObs) - 1
+            Ob tq = array.get(bearObs, j)
+            if not tq.dead and (na(topDn) or tq.lvl < topDn)
+                topDn := tq.lvl
+    if array.size(pDnLvl) > 0
+        int hitD  = -1
+        int hitDB = na
+        for j = 0 to array.size(pDnLvl) - 1
+            float lv2 = array.get(pDnLvl, j)   // highest candidate open
+            int   bb2 = array.get(pDnBar, j)   // first candidate of the leg
+            int   sw2 = array.get(pDnSw, j)    // swing high the leg ends at
+            // v7.18 mirror: the earliest candidate whose open this close is below.
+            int rb2 = na
+            if hitD == -1 and close < lv2 and bar_index - bb2 <= 500
+                bool others2 = false
+                if sw2 - 1 >= bb2
+                    for b = bb2 to sw2 - 1
+                        int oq3 = bar_index - b
+                        if cmeOpen[oq3] and close[oq3] > open[oq3] and (na(liqHigh) or open[oq3] <= liqHigh)
+                            others2 := true
+                            break
+                int endB2 = others2 ? sw2 - 1 : sw2
+                for b = bb2 to endB2
+                    int oq4 = bar_index - b
+                    if cmeOpen[oq4] and close[oq4] > open[oq4] and (na(liqHigh) or open[oq4] <= liqHigh) and close < open[oq4]
+                        rb2 := b
+                        break
+            float rl2 = na(rb2) ? float(na) : open[bar_index - rb2]
+            bool ok2 = dirState == -1 and not na(rb2) and close < open and bar_index > rb2 and not na(ewStartBar) and rb2 >= ewStartBar and rl2 < topDn
+            if ok2 and hitD == -1
+                hitD  := j
+                hitDB := rb2
+        if hitD != -1
+            int   dBar = hitDB
+            int   dSw  = array.get(pDnSw, hitD)
+            int   dOf  = bar_index - dBar
+            float dLvl = open[dOf]
+            float dLo  = math.min(open[dOf], close[dOf])
+            float dHi  = math.max(open[dOf], close[dOf])
+            float dMt  = (open[dOf] + close[dOf]) / 2
+            int   dRunR = 0
+            for b = dBar to dSw
+                int o6 = bar_index - b
+                if not cmeOpen[o6]
+                    continue
+                if close[o6] > open[o6]
+                    dLo := math.min(dLo, open[o6], close[o6])
+                    dHi := math.max(dHi, open[o6], close[o6])
+                    dRunR += 1
+                else
+                    break
+            Ob nb2 = Ob.new(dLvl, dMt, dBar)
+            nb2.bLo := dLo
+            nb2.bHi := dHi
+            int dRun = dRunR
+            int dAOff = bar_index - dBar
+            float dClose = dAOff >= 0 and dAOff <= 500 ? close[dAOff] : na
+            int dPar = -1
+            if array.size(bearObs) > 0
+                for j = 0 to array.size(bearObs) - 1
+                    Ob pk2 = array.get(bearObs, j)
+                    if not pk2.dead and not pk2.isPb and pk2.bi < dBar
+                        dPar := j
+            if dirState == -1 and dRun == 1 and dPar >= 0 and not array.get(bearObs, dPar).hasPb
+                Ob pq = array.get(bearObs, dPar)
+                if dLvl < pq.lvl and dHi >= pq.bLo and dHi <= pq.bHi and (na(pq.inv) or na(dClose) or dClose <= pq.inv)
+                    nb2.isPb := true
+                    pq.hasPb := true
+            array.push(bearObs, nb2)
+            fireAlert(alOB, (nb2.isPb ? "-PB" : "-OB") + " formed — " + fmtP(nb2.lvl))
+            for j = hitD to 0
+                array.remove(pDnLvl, j)
+                array.remove(pDnBar, j)
+                array.remove(pDnSw, j)
+                array.remove(pDnProt, j)
+// ─── CISD kill (v7.25) ───────────────────────────────────────────────────
+// The CISD is a block: the bodies of its candles. It dies on two consecutive
+// body closes beyond the block (below it for a +CISD), counted only while it is
+// held. A wick breaches nothing. Its OBs, PBs and FVG die with it and an open
+// trade is flattened at the kill bar's close (entry model). The DR side's
+// quarter expansion (above) also kills it.
+var int    cisdOut = 0
+if barOK
+    if dirState == 0 or deliveryDone or na(cisdBlkLo) or na(cisdBlkHi)
+        cisdOut := 0
+    else
+        bool outP = dirState == -1 ? close > cisdBlkHi : close < cisdBlkLo
+        cisdOut := outP ? cisdOut + 1 : 0
+        if cisdOut >= killCloses
+            killWhy := "two closes " + (dirState == -1 ? "above its block " + fmtP(cisdBlkHi) : "below its block " + fmtP(cisdBlkLo))
+            if dirState == -1
+                structKillDn := true
+            else
+                structKillUp := true
+            cisdOut := 0
+// ─── The live setup ──────────────────────────────────────────────────────
+if barOK and liqClosed and dirState != 0 and not deliveryDone
+    bool stateKilled = structKillUp or structKillDn
+    if stateKilled
+        fireAlert(alTH, (structKillUp ? "Bullish" : "Bearish") + " CISD invalidated — " + killWhy)
+    structKillUp := false
+    structKillDn := false
+    // Per-block invalidation: TWO consecutive body closes beyond the block.
+    // A single close, or a wick, never kills it.
+    if array.size(bearObs) > 0
+        for i = 0 to array.size(bearObs) - 1
+            Ob ob = array.get(bearObs, i)
+            if not ob.dead
+                ob.invCount := (not ob.isCisd) and close > ob.bHi ? ob.invCount + 1 : 0
+                if ob.invCount >= killCloses
+                    ob.dead := true
+                    killObDraw(ob)
+                    if dirState == -1 and i == activeIdx
+                        activeIdx := -1
+                        fireAlert(alOBX, (ob.isPb ? "-PB" : "-OB") + " invalidated — " + fmtP(ob.lvl))
+    if array.size(bullObs) > 0
+        for i = 0 to array.size(bullObs) - 1
+            Ob ob = array.get(bullObs, i)
+            if not ob.dead
+                // v7.25: an OB or PB dies on two body closes beyond its block;
+                // the CISD has its own count (above).
+                ob.invCount := (not ob.isCisd) and close < ob.bLo ? ob.invCount + 1 : 0
+                if ob.invCount >= killCloses
+                    ob.dead := true
+                    killObDraw(ob)
+                    if dirState == 1 and i == activeIdx
+                        activeIdx := -1
+                        fireAlert(alOBX, (ob.isPb ? "+PB" : "+OB") + " invalidated — " + fmtP(ob.lvl))
+    // ── State kill executor ──
+    // The CISD died on one of its three kill rules. That wipes both sides and
+    // returns to hunting. The sweep flag is NOT cleared: the pool was raided
+    // and that does not un-happen, so the side re-arms on a reclaim.
+    if stateKilled
+        killedOnce := true
+        // The reversal thesis is invalidated — every retest signal printed
+        // under this state is now a failed signal, so remove its arrow.
+        // (killObDraw deliberately keeps arrows for natural OB death; a state
+        // kill is the one path that clears them, matching the void rule.)
+        if array.size(bearObs) > 0
+            for i = 0 to array.size(bearObs) - 1
+                Ob ob = array.get(bearObs, i)
+                if not na(ob.rtLb)
+                    label.delete(ob.rtLb)
+                    ob.rtLb := na
+                if not ob.dead
+                    ob.dead := true
+                    killObDraw(ob)
+        if array.size(bullObs) > 0
+            for i = 0 to array.size(bullObs) - 1
+                Ob ob = array.get(bullObs, i)
+                if not na(ob.rtLb)
+                    label.delete(ob.rtLb)
+                    ob.rtLb := na
+                if not ob.dead
+                    ob.dead := true
+                    killObDraw(ob)
+        dirState := 0
+        cisdLvl := na
+        cisdBlkLo := na
+        cisdBlkHi := na
+        activeIdx := -1
+    // Draw every eligible setup-side OB (persistent, CISD-style)
+    arr = dirState == -1 ? bearObs : bullObs
+    if array.size(arr) > 0
+        for i = 0 to array.size(arr) - 1
+            Ob ob = array.get(arr, i)
+            if not ob.dead and na(ob.obLn) and na(ob.lb)
+                drawObLines(ob, dirState)
+    // Retest signal invalidation: two consecutive candles, each engulfing
+    // the rejection candle's BODY in the reversal direction, void the
+    // printed signal — glyph deleted, cycle re-armed.
+    if array.size(arr) > 0
+        for i = 0 to array.size(arr) - 1
+            Ob ob = array.get(arr, i)
+            if ob.fired and not ob.dead
+                engulf = dirState == -1 ?
+                     (close > open and close >= ob.rtBodyHi and open <= ob.rtBodyLo) :
+                     (close < open and close <= ob.rtBodyLo and open >= ob.rtBodyHi)
+                ob.rtCount := engulf ? ob.rtCount + 1 : 0
+                if ob.rtCount >= 2
+                    if not na(ob.rtLb)
+                        label.delete(ob.rtLb)
+                        ob.rtLb := na
+                    ob.fired    := false
+                    ob.touched  := false
+                    ob.rtCount  := 0
+                    ob.rtBodyHi := na
+                    ob.rtBodyLo := na
+                    fireAlert(alRT, "Retest invalidated — " + (dirState == -1 ? (ob.isCisd ? "-CISD " : ob.isPb ? "-PB " : "-OB ") : (ob.isCisd ? "+CISD " : ob.isPb ? "+PB " : "+OB ")) + fmtP(ob.lvl))
+    // Retest target selection: the MOST RECENTLY validated eligible OB.
+    // The freshest confirmed anchor is the working level (CISD behaviour).
+    int best = -1
+    if array.size(arr) > 0
+        for i = 0 to array.size(arr) - 1
+            Ob ob = array.get(arr, i)
+            if not ob.dead and (na(eqLvl) or (dirState == -1 ? ob.lvl >= eqLvl : ob.lvl <= eqLvl))
+                best := i
+    if best != -1 and best != activeIdx
+        activeIdx := best
+        Ob a = array.get(arr, best)
+        fireAlert(alOB, (dirState == -1 ? (a.isCisd ? "-CISD" : a.isPb ? "-PB" : "-OB") : (a.isCisd ? "+CISD" : a.isPb ? "+PB" : "+OB")) + " active — " + fmtP(a.lvl))
+    // Retest — one live signal per OB (void rule can re-arm). Sequence is
+    // strictly close-based: body close beyond the level (setup side), then
+    // body close back at/through the level (the retrace acceptance), then
+    // body close back through on the setup side = trigger. Wick grazes and
+    // straight displacement never count.
+    if inExec and activeIdx != -1
+        arr2 = dirState == -1 ? bearObs : bullObs
+        Ob a2 = array.get(arr2, activeIdx)
+        if not a2.fired
+            if dirState == -1
+                if a2.below and not a2.touched and close >= a2.lvl
+                    a2.touched := true
+                if a2.touched and close < a2.lvl
+                    a2.fired    := true
+                    a2.rtCount  := 0
+                    a2.rtBodyHi := math.max(open, close)
+                    a2.rtBodyLo := math.min(open, close)
+                    if a2.isCisd or obPbOn
+                        a2.rtLb := label.new(bar_index, high + rtOff(), "▼",
+                             style = label.style_none, textcolor = rtDnCol,
+                             size = sizeOf(retestSize))
+                        keepB(a2.rtLb)
+                    fireAlert(alRT, "Retest confirmed — " + (a2.isCisd ? "-CISD " : a2.isPb ? "-PB " : "-OB ") + fmtP(a2.lvl))
+                if close < a2.lvl
+                    a2.below := true
+            else
+                if a2.below and not a2.touched and close <= a2.lvl
+                    a2.touched := true
+                if a2.touched and close > a2.lvl
+                    a2.fired    := true
+                    a2.rtCount  := 0
+                    a2.rtBodyHi := math.max(open, close)
+                    a2.rtBodyLo := math.min(open, close)
+                    if a2.isCisd or obPbOn
+                        a2.rtLb := label.new(bar_index, low - rtOff(), "▲",
+                             style = label.style_none, textcolor = rtUpCol,
+                             size = sizeOf(retestSize))
+                        keepB(a2.rtLb)
+                    fireAlert(alRT, "Retest confirmed — " + (a2.isCisd ? "+CISD " : a2.isPb ? "+PB " : "+OB ") + fmtP(a2.lvl))
+                if close > a2.lvl
+                    a2.below := true
+
+// ─── Entry model: MSS -> FVG (else IFVG) -> retest ───────────────────────
+// The step a price can actually be placed at. On trade.xyz (HIP3XYZ) markets
+// Hyperliquid allows about five significant figures, and whole numbers are
+// always valid, so the step is 10^(digits before the point - 5), capped at 1.
+// Everything else uses the chart's tick.
+priceStep(float px) =>
+    float st = syminfo.mintick
+    if syminfo.prefix == "HIP3XYZ" and not na(px) and px > 0
+        float sig = math.pow(10, math.floor(math.log10(px)) - 4)
+        st := math.max(syminfo.mintick, math.min(1.0, sig))
+    st
+// VI-encompassing gap at c1..c3 in direction gd (-1 bearish gap, +1 bullish).
+// Each side widens from the wick to the neighbouring body where a volume
+// imbalance sits between the bodies. Returns [top, bottom], na if no gap.
+// v7.20: c2 and c3 are the next two CME-valid candles after c1; returns c3's
+// bar as well.
+gapAt(int gd, int c1) =>
+    float t = na
+    float b = na
+    int   c3 = na
+    int o1 = bar_index - c1
+    int o2 = -1
+    int o3 = -1
+    if o1 >= 2 and o1 <= 500 and cmeOpen[o1]
+        o2 := o1 - 1
+        while o2 > 0 and not cmeOpen[o2]
+            o2 -= 1
+        o3 := o2 - 1
+        while o3 >= 0 and not cmeOpen[o3]
+            o3 -= 1
+    if o3 < 0
+        o1 := -1
+    else
+        c3 := bar_index - o3
+    if o1 < 0
+        t := na
+    else if gd == -1 and low[o1] > high[o3]
+        t := low[o1]
+        b := high[o3]
+        if math.min(open[o1], close[o1]) > math.max(open[o2], close[o2])
+            t := math.min(open[o1], close[o1])
+        if math.min(open[o2], close[o2]) > math.max(open[o3], close[o3])
+            b := math.max(open[o3], close[o3])
+    else if gd == 1 and high[o1] < low[o3]
+        b := high[o1]
+        t := low[o3]
+        if math.max(open[o1], close[o1]) < math.min(open[o2], close[o2])
+            b := math.max(open[o1], close[o1])
+        if math.max(open[o2], close[o2]) < math.min(open[o3], close[o3])
+            t := math.min(open[o3], close[o3])
+    [t, b, c3]
+// Volume imbalances chained BEFORE a zone's first candle (v7.18). A body gap
+// between the previous candle and c1 that touches the zone's far edge joins
+// the zone, and the walk repeats while the gaps chain. Returns the new far
+// edge and first candle. Never walks before floorBar. 8 Oct XYZ100 1m: 07:12
+// closed 30,910, 07:13 opened 30,912, so the +FVG runs from 30,910.
+viBack(int d, int c1, float edge, int floorBar) =>
+    float e = edge
+    int   c = c1
+    bool  go = not na(floorBar)
+    while go
+        int p = openBefore(c)   // the previous valid candle
+        if na(p) or p < floorBar
+            break
+        int q0 = bar_index - p
+        int q1 = bar_index - c
+        float hi0 = math.max(open[q0], close[q0])
+        float lo0 = math.min(open[q0], close[q0])
+        float hi1 = math.max(open[q1], close[q1])
+        float lo1 = math.min(open[q1], close[q1])
+        if d == 1 and hi0 < lo1 and lo1 <= e
+            e := hi0
+            c := p
+        else if d == -1 and lo0 > hi1 and hi1 >= e
+            e := lo0
+            c := p
+        else
+            go := false
+    [e, c]
+// The FVG: first gap in the setup direction d with c1 at or after fromBar and
+// c3 at or before toBar, not violated by toBar (two consecutive body closes
+// through its far edge).
+zoneFvg(int d, int fromBar, int toBar, float cap) =>
+    float zt = na
+    float zb = na
+    int   zc = na
+    if not na(fromBar) and toBar - fromBar >= 2 and bar_index - fromBar <= 500
+        for c1 = fromBar to toBar - 2
+            [t, b, c3] = gapAt(d, c1)
+            // Entry edge must sit at or inside the DR (cap = swept extreme).
+            if not na(t) and c3 <= toBar and (na(cap) or (d == -1 ? b < cap : t > cap))
+                bool alive = true
+                int  thru  = 0
+                if c3 + 1 <= toBar
+                    for k = c3 + 1 to toBar
+                        int ko = bar_index - k
+                        if cmeOpen[ko]
+                            thru := (d == -1 ? close[ko] > t : close[ko] < b) ? thru + 1 : 0
+                            if thru >= killCloses
+                                alive := false
+                                break
+                if alive
+                    zt := t
+                    zb := b
+                    zc := c1
+                    break
+    [zt, zb, zc]
+// The IFVG: a gap of the raid leg (opposite polarity, c1 from legFrom, c3 by
+// legTo) that a body close inverted by toBar and that was not closed back
+// through after. Nearest the MSS wins: lowest for a short, highest for a long.
+zoneIfvg(int d, int legFrom, int legTo, int toBar, float cap) =>
+    float zt = na
+    float zb = na
+    int   zc = na
+    if not na(legFrom) and not na(legTo) and legTo - legFrom >= 2 and bar_index - legFrom <= 500
+        for c1 = legFrom to legTo - 2
+            [t, b, c3] = gapAt(-d, c1)
+            if not na(t) and c3 <= legTo and c3 + 1 <= toBar
+                bool inv  = false
+                bool dead = false
+                for k = c3 + 1 to toBar
+                    int ko = bar_index - k
+                    if not cmeOpen[ko]
+                        continue
+                    if not inv
+                        if d == -1 ? close[ko] < b : close[ko] > t
+                            inv := true
+                    else if d == -1 ? close[ko] > t : close[ko] < b
+                        dead := true
+                        break
+                if inv and not dead and (na(cap) or (d == -1 ? b < cap : t > cap)) and (na(zt) or (d == -1 ? b < zb : t > zt))
+                    zt := t
+                    zb := b
+                    zc := c1
+    [zt, zb, zc]
+// Target and RR for one path: EQ if it pays 2R or more, else the 0.705 of the
+// DR if it pays 2R or more, else na (no trade). The 0.705 is measured in the
+// TRADE's direction — from the swept extreme toward the far one (DR high down
+// for a short, DR low up for a long) — never from the drawn fib, whose 1 and 0
+// follow which extreme formed first. Both targets are rounded to the placeable
+// step against the trade; RR is floored to 0.1. The DR extreme is no longer a
+// target; it remains the delivery level that freezes the session.
+tgtFor(int d, float en, float st) =>
+    float risk = math.abs(st - en)
+    float pStep = priceStep(eqLvl)
+    float tEq = na(eqLvl) ? float(na) : d == -1 ? math.ceil(eqLvl / pStep) * pStep : math.floor(eqLvl / pStep) * pStep
+    float r705 = na(liqHigh) or na(liqLow) ? float(na) : d == -1 ? liqHigh - 0.705 * (liqHigh - liqLow) : liqLow + 0.705 * (liqHigh - liqLow)
+    float xStep = priceStep(r705)   // v7.20: its own step, not EQ's
+    float tEx = na(r705) ? float(na) : d == -1 ? math.ceil(r705 / xStep) * xStep : math.floor(r705 / xStep) * xStep
+    float rEq = risk > 0 and not na(tEq) ? (d == -1 ? en - tEq : tEq - en) / risk : float(na)
+    float rEx = risk > 0 and not na(tEx) ? (d == -1 ? en - tEx : tEx - en) / risk : float(na)
+    // v7.27: DR opposite — the far DR extreme, on its own step, 2R or no trade.
+    float rDr = na(liqHigh) or na(liqLow) ? float(na) : d == -1 ? liqLow : liqHigh
+    float dStep = priceStep(rDr)
+    float tDr = na(rDr) ? float(na) : d == -1 ? math.ceil(rDr / dStep) * dStep : math.floor(rDr / dStep) * dStep
+    float rD  = risk > 0 and not na(tDr) ? (d == -1 ? en - tDr : tDr - en) / risk : float(na)
+    float t = na
+    float r = na
+    if tpEq
+        if not na(rEq) and rEq >= 2.0
+            t := tEq
+            r := math.floor(rEq * 10) / 10
+        else if not na(rEx) and rEx >= 2.0
+            t := tEx
+            r := math.floor(rEx * 10) / 10
+    // The opposite extreme: the only target when TP at EQ is off, and the
+    // fallback when EQ and the 0.705 both pay under 2R.
+    if na(t) and tpDr and not na(rD) and rD >= 2.0
+        t := tDr
+        r := math.floor(rD * 10) / 10
+    [t, r]
+// v7.27: the second target. With both targets on, the opposite DR extreme
+// beyond the first one, if it pays 2R or more. na otherwise.
+tgt2For(int d, float en, float st, float t1) =>
+    float t = na
+    float r = na
+    if tpEq and tpDr and not na(t1) and not na(liqHigh) and not na(liqLow) and not na(en) and not na(st)
+        float risk = math.abs(st - en)
+        float x  = d == -1 ? liqLow : liqHigh
+        float xs = priceStep(x)
+        float xt = d == -1 ? math.ceil(x / xs) * xs : math.floor(x / xs) * xs
+        float xr = risk > 0 ? (d == -1 ? en - xt : xt - en) / risk : float(na)
+        if not na(xr) and xr >= 2.0 and (d == -1 ? xt < t1 : xt > t1)
+            t := xt
+            r := math.floor(xr * 10) / 10
+    [t, r]
+// v7.27: TP label text names the level it sits on.
+tpTxt(float t, float r) =>
+    string nm = ""
+    if not na(t)
+        nm := not na(eqLvl) and math.abs(t - eqLvl) <= priceStep(eqLvl) ? "EQ " : not na(liqLow) and math.abs(t - liqLow) <= priceStep(liqLow) ? "DR L " : not na(liqHigh) and math.abs(t - liqHigh) <= priceStep(liqHigh) ? "DR H " : "0.705 "
+    "TP " + nm + str.tostring(r, "#.0") + "R"
+// Zone box, label and C.E. for one path. Returns the drawings (na if off).
+drawZone(int d, bool isIfvg, int zb, float zt, float zbo, string kind) =>
+    box   bx = na
+    label lb = na
+    line  ce = na
+    if zoneOn
+        color dc = d == -1 ? obBearCol : obBullCol
+        color zc = isIfvg ? (d == -1 ? bearIfvgCol : bullIfvgCol) : (d == -1 ? bearFvgCol : bullFvgCol)
+        bx := box.new(zb, zt, bar_index + fvgLen, zbo, border_color = na, bgcolor = zc)
+        // Same spacing as the CISD label from its line: on the box's right edge,
+        // at the zone's centre.
+        lb := label.new(bar_index + fvgLen, (zt + zbo) / 2, kind, style = label.style_label_left,
+             color = color.new(color.white, 100), textcolor = dc, size = size.small)
+        // C.E. — hardcoded: #424351, solid colour, dotted, width 1
+        ce := line.new(zb, (zt + zbo) / 2, bar_index + fvgLen, (zt + zbo) / 2,
+             color = color.new(#424351, 0), style = line.style_dotted, width = 1)
+        keepX(bx)
+        keepB(lb)
+        keepL(ce)
+    [bx, lb, ce]
+// Once the stop is violated the trade is over, as on the trading platform:
+// its levels and fill marker come off the chart. The zone is a PD array, not
+// part of the trade: it is removed here only when keepZone is false (the CISD
+// died with the trade open). The status row still reports "Stopped".
+// (Deletes only — no global is reassigned here.)
+clearTrade(bool keepZone) =>
+    line.delete(eVLn)
+    line.delete(eVLnS)
+    label.delete(eEnLb)
+    label.delete(eSlLb)
+    label.delete(eTpLb)
+    label.delete(eTp2Lb)
+    label.delete(eRtLb)
+    if not keepZone
+        if ePath == 1
+            box.delete(aBx)
+            label.delete(aLb)
+            line.delete(aCe)
+        else if ePath == 2
+            box.delete(bBx)
+            label.delete(bLb)
+            line.delete(bCe)
+// A new CISD opens a new setup. dirState only changes on confirmed bars.
+bool cisdJustSet = dirState != 0 and nz(dirState[1]) != dirState
+if barOK
+    // Pre-fill cancels
+    if (eStage == 1 or eStage == 2) and dirState != eDir
+        eStage := 4
+        eMsg   := "CISD invalidated before entry"
+    else if (eStage == 1 or eStage == 2) and deliveryDone
+        eStage := 4
+        eMsg   := "Delivery complete before entry"
+    else if (eStage == 1 or eStage == 2) and not inExec
+        eStage := 4
+        eMsg   := "EW closed before entry"
+    else if eRound >= 2 and eStage == 1 and not na(tgtDr ? (eDir == -1 ? liqLow : liqHigh) : eqLvl) and (eDir == -1 ? low <= (tgtDr ? liqLow : eqLvl) : high >= (tgtDr ? liqHigh : eqLvl))
+        eStage := 4
+        eMsg   := tgtDr ? (eDir == -1 ? "DR low" : "DR high") + " reached before re-entry" : "EQ reached before re-entry"
+    // CISD killed with a trade open: the thesis is dead, so flatten at this
+    // bar's close — unless the stop traded first on this same bar.
+    if eStage == 3 and dirState != eDir and bar_index > eFillBar
+        if eDir == -1 ? high >= eStop : low <= eStop
+            eStage := 4
+            eMsg   := "Stopped"
+            clearTrade(false)
+        else
+            eStage := 4
+            eMsg   := "Flat at CISD kill " + fmtP(close)
+            // v7.18: the CISD died with the trade open, so the trade and its zone
+            // come off the chart, the same as a stop.
+            clearTrade(false)
+    // Open a setup on the CISD
+    if cisdJustSet and inExec
+        eStage   := 1
+        eDir     := dirState
+        eMsg     := ""
+        eRaidBar := dirState == -1 ? raidHiBar : raidLoBar
+        eMssLvl  := na
+        eMssRef  := na
+        eMssBar  := na
+        eFillBar := na
+        ePath    := 0
+        aState   := 0
+        bState   := 0
+        eRound   := 1
+        eFromBar := eRaidBar
+        // A CISD that formed after another one died this session works from its
+        // OWN swing (v7.18): the MSS reference and the FVG search start there,
+        // not at the session's raid extreme. 8 Oct XYZ100 1m: swing 07:11, so
+        // the zone comes from 07:12 on.
+        if killedOnce and not na(cisdSwBar)
+            eRaidBar := cisdSwBar
+            eFromBar := cisdSwBar + 1
+        array.clear(zkFar)
+        array.clear(zkCnt)
+        array.clear(zkBx)
+        array.clear(zkLb)
+        array.clear(zkCe)
+        eMssLn  := na
+        eMssLb  := na
+        eRtLb   := na
+        eEnLb   := na
+        eSlLb   := na
+        eTpLb   := na
+        eVLn    := na
+        eVLnS   := na
+        aBx := na
+        aLb := na
+        aCe := na
+        aChainEnd := na
+        bBx := na
+        bLb := na
+        bCe := na
+        // MSS reference: the most recent swing (low for a short, high for a
+        // long) that formed before the raid extreme — the swing that built the
+        // raid leg. Without one there is no MSS and no path B; path A still runs.
+        if dirState == -1 and array.size(slBarA) > 0
+            for j = array.size(slBarA) - 1 to 0
+                if array.get(slBarA, j) < eRaidBar and (na(liqHigh) or array.get(slPxA, j) <= liqHigh)
+                    eMssRef := array.get(slBarA, j)
+                    eMssLvl := array.get(slPxA, j)
+                    break
+        else if dirState == 1 and array.size(shBarA) > 0
+            for j = array.size(shBarA) - 1 to 0
+                if array.get(shBarA, j) < eRaidBar and (na(liqLow) or array.get(shPxA, j) >= liqLow)
+                    eMssRef := array.get(shBarA, j)
+                    eMssLvl := array.get(shPxA, j)
+                    break
+        if na(eMssLvl)
+            bState := 2
+    // MSS: context for the chart, and the trigger for path B. Read while a
+    // trade is open too, so the break is drawn on its own candle and a second
+    // round cannot take a later close for it.
+    if (eStage == 1 or eStage == 2 or eStage == 3) and inExec and na(eMssBar) and not na(eMssLvl) and (eDir == -1 ? close < eMssLvl : close > eMssLvl)
+        eMssBar := bar_index
+        if mssOn
+            color mc = eDir == -1 ? mssBearCol : mssBullCol
+            eMssLn := line.new(eMssRef, eMssLvl, bar_index, eMssLvl, color = mc, width = 1, style = styleOf(mssStyle))
+            eMssLb := label.new(int(math.round((eMssRef + bar_index) / 2.0)), eMssLvl, eDir == -1 ? "-MSS" : "+MSS",
+                 style = eDir == -1 ? label.style_label_up : label.style_label_down,
+                 color = color.new(color.white, 100), textcolor = eDir == -1 ? obBearCol : obBullCol, size = size.small)
+            keepL(eMssLn)
+            keepB(eMssLb)
+    if (eStage == 1 or eStage == 2) and inExec
+        string sideTxt = eDir == -1 ? "short" : "long"
+        string rTag = eRound >= 2 ? " · entry " + str.tostring(eRound) : ""
+        // Path A: first FVG after the raid extreme. The IFVG is the fallback
+        // only once the MSS has printed with no FVG presented: the raid leg is
+        // full of small gaps the CISD candle inverts, and taking one of those
+        // on the CISD bar would pre-empt the displacement FVG that forms a bar
+        // later (2 Oct SP500: a 0.1-point IFVG at 09:48 vs the 09:49 FVG).
+        // Locked once found.
+        if aState == 0
+            float zCap = eDir == -1 ? liqHigh : liqLow
+            [ft, fb, fc] = zoneFvg(eDir, eFromBar, bar_index, zCap)
+            bool fI = false
+            // No IFVG on a re-entry: it comes back in on a new displacement only.
+            if eRound == 1 and na(ft) and not na(eMssRef) and not na(eMssBar) and bar_index > eMssBar
+                [it, ib, ic] = zoneIfvg(eDir, eMssRef, eRaidBar, bar_index, zCap)
+                ft := it
+                fb := ib
+                fc := ic
+                fI := not na(it)
+            // Stacked gaps (v7.11, Merge mode only since v7.22): a later gap in
+            // the same direction that shares a candle with the zone (its first
+            // candle within two bars of the previous gap's) joins the zone.
+            int fEnd = fc
+            if mergeOn and not na(ft) and not fI and fc + 1 <= bar_index - 2
+                for c = fc + 1 to bar_index - 2
+                    if openCount(fEnd, c) > 2
+                        break
+                    [mt, mb, m3] = gapAt(eDir, c)
+                    if not na(mt)
+                        ft := math.max(ft, mt)
+                        fb := math.min(fb, mb)
+                        fEnd := c
+            // Imbalances chained before the first candle join the zone (v7.18).
+            int fStart = fc
+            if not na(ft) and not fI
+                [vEdge, vBar] = viBack(eDir, fc, eDir == 1 ? fb : ft, eFromBar)
+                if eDir == 1
+                    fb := vEdge
+                else
+                    ft := vEdge
+                fStart := vBar
+            if not na(ft)
+                aTop     := ft
+                aBot     := fb
+                aZoneBar := fStart
+                aChainEnd := fEnd
+                aIfvg    := fI
+                aEntry   := eDir == -1 ? fb : ft
+                // v7.18: the stop sits beyond the zone's FIRST candle — its low
+                // for a long, its high for a short — after any chained imbalance
+                // (8 Oct: 07:12 low 30,903). An IFVG keeps its far edge.
+                int sOf = bar_index - fStart
+                aStop    := fI ? (eDir == -1 ? ft : fb) : stopFrom(eDir, fStart, aEntry)
+                aArmBar  := bar_index
+                string kA = (eDir == -1 ? "-" : "+") + (fI ? "IFVG" : "FVG")
+                [bxA, lbA, ceA] = drawZone(eDir, fI, fStart, ft, fb, kA)
+                aBx := bxA
+                aLb := lbA
+                aCe := ceA
+                [tA, rA] = tgtFor(eDir, aEntry, aStop)
+                aTgt := tA
+                aRR  := rA
+                if na(aTgt)
+                    aState := 2
+                    eMsg   := "No trade · " + kA + " risk too wide"
+                else
+                    aState := 1
+                    fireAlert(alSU, "Setup ready — " + sideTxt + " limit " + fmtP(aEntry) + " | SL " + fmtP(aStop) +
+                         " | TP " + fmtP(aTgt) + " (" + str.tostring(aRR, "#.0") + "R) — " + kA + rTag)
+        // Path B: the gap whose middle candle is the MSS candle, read on the
+        // first valid candle after the break (c3); c1 is the valid candle
+        // before the MSS candle. Skipped if it is path A's own gap.
+        if bState == 0 and not na(eMssBar) and bar_index > eMssBar
+            bool gNow = vB1 == eMssBar
+            int  gC1  = vB2
+            float gt = na
+            float gb = na
+            if gNow
+                [gt0, gb0, g3] = gapAt(eDir, gC1)
+                gt := gt0
+                gb := gb0
+            int gStart = gC1
+            if not na(gt)
+                [gEdge, gBar] = viBack(eDir, gC1, eDir == 1 ? gb : gt, eFromBar)
+                if eDir == 1
+                    gb := gEdge
+                else
+                    gt := gEdge
+                gStart := gBar
+            // Absorbed if it is path A's gap or extends A's chain (v7.11).
+            bool sameAsA = aState == 1 and not aIfvg and not na(aChainEnd) and aChainEnd >= 0 and gC1 >= aZoneBar and openCount(aChainEnd, gC1) <= 2
+            bool bInDr = not na(gt) and (eDir == -1 ? gb < liqHigh : gt > liqLow)
+            bool bRound = eRound == 1 or gC1 >= eFromBar
+            if gNow and not na(gt) and not sameAsA and bInDr and bRound
+                bTop     := gt
+                bBot     := gb
+                bEntry   := eDir == -1 ? gb : gt
+                bStop    := stopFrom(eDir, gStart, bEntry)
+                bArmBar  := bar_index
+                string kB = (eDir == -1 ? "-" : "+") + "FVG (MSS)"
+                [bxB, lbB, ceB] = drawZone(eDir, false, gStart, gt, gb, kB)
+                bBx := bxB
+                bLb := lbB
+                bCe := ceB
+                [tB, rB] = tgtFor(eDir, bEntry, bStop)
+                bTgt := tB
+                bRR  := rB
+                if na(bTgt)
+                    bState := 2
+                    eMsg   := "No trade · " + kB + " risk too wide"
+                else
+                    bState := 1
+                    fireAlert(alSU, "Setup ready — " + sideTxt + " limit " + fmtP(bEntry) + " | SL " + fmtP(bStop) +
+                         " | TP " + fmtP(bTgt) + " (" + str.tostring(bRR, "#.0") + "R) — " + kB + rTag)
+            else
+                bState := 2
+        // Which armed path is shown: the one price meets first on the retrace
+        // (lower limit for a short, higher for a long).
+        int pick = 0
+        if aState == 1 and bState == 1
+            pick := eDir == -1 ? (bEntry < aEntry ? 2 : 1) : (bEntry > aEntry ? 2 : 1)
+        else
+            pick := aState == 1 ? 1 : bState == 1 ? 2 : 0
+        if pick != 0
+            eStage := 2
+            ePath  := pick
+            eEntry := pick == 1 ? aEntry : bEntry
+            eStop  := pick == 1 ? aStop  : bStop
+            eTgt   := pick == 1 ? aTgt   : bTgt
+            eRR    := pick == 1 ? aRR    : bRR
+            eIfvg  := pick == 1 ? aIfvg  : false
+            if lvlOn
+                // v7.18: no horizontal entry / SL / TP lines. The trade shows as
+                // its labels on the dotted vertical bracket only.
+                if na(eEnLb)
+                    // The vertical runs through the label column; the labels sit ON it,
+                    // centred, with a chart-coloured background so the line breaks
+                    // around each name: SL — Entry — TP read as one bracket.
+                    eVLn  := line.new(bar_index + TRADE_OFF, eEntry, bar_index + TRADE_OFF, eTgt,
+                         color = color.new(#2962FF, 0), style = line.style_dotted, width = 1)
+                    eVLnS := line.new(bar_index + TRADE_OFF, eStop, bar_index + TRADE_OFF, eEntry,
+                         color = color.new(#F23645, 0), style = line.style_dotted, width = 1)
+                    // Label colours are fixed (v7.18): Entry and TP #2962FF, SL #F23645.
+                    // The SL carries its R like the TP: it is always one R of loss.
+                    eEnLb := label.new(bar_index + TRADE_OFF, eEntry, "Entry", style = label.style_label_center,
+                         color = chart.bg_color, textcolor = color.new(#2962FF, 0), size = size.small)
+                    eSlLb := label.new(bar_index + TRADE_OFF, eStop, "SL -1R", style = label.style_label_center,
+                         color = chart.bg_color, textcolor = color.new(#F23645, 0), size = size.small)
+                    eTpLb := label.new(bar_index + TRADE_OFF, eTgt, tpTxt(eTgt, eRR), style = label.style_label_center,
+                         color = chart.bg_color, textcolor = color.new(#2962FF, 0), size = size.small)
+                    keepL(eVLn)
+                    keepL(eVLnS)
+                    keepB(eEnLb)
+                    keepB(eSlLb)
+                    keepB(eTpLb)
+                else
+                    label.set_y(eEnLb, eEntry)
+                    label.set_y(eSlLb, eStop)
+                    label.set_y(eTpLb, eTgt)
+                    label.set_text(eTpLb, tpTxt(eTgt, eRR))
+                    line.set_y1(eVLn, eEntry)
+                    line.set_y2(eVLn, eTgt)
+                    line.set_y1(eVLnS, eStop)
+                    line.set_y2(eVLnS, eEntry)
+        else if aState == 2 and bState == 2
+            eStage := 4
+            eMsg   := eMsg != "" ? eMsg : "No FVG or IFVG to trade"
+// Fill: the first armed limit touched, on a bar after the one that armed it.
+// Runs intrabar so the alert lands while the candle is live; state commits at
+// the close. If both limits are touched on one bar, the one price meets first
+// on the retrace wins. A candle that touches a limit AND that path's target is
+// no trade (v7.20): OHLC cannot say which came first, so the conservative
+// reading is taken and the setup ends below.
+bool sameBarX = false
+if eStage == 2 and inExec and cmeOpen
+    bool aHit = aState == 1 and bar_index > aArmBar and (eDir == -1 ? high >= aEntry : low <= aEntry)
+    bool bHit = bState == 1 and bar_index > bArmBar and (eDir == -1 ? high >= bEntry : low <= bEntry)
+    bool aTx  = aHit and (eDir == -1 ? low <= aTgt : high >= aTgt)
+    bool bTx  = bHit and (eDir == -1 ? low <= bTgt : high >= bTgt)
+    sameBarX := aTx or bTx
+    if (aHit or bHit) and not sameBarX
+        int f = aHit and bHit ? (eDir == -1 ? (bEntry < aEntry ? 2 : 1) : (bEntry > aEntry ? 2 : 1)) : aHit ? 1 : 2
+        ePath  := f
+        eEntry := f == 1 ? aEntry : bEntry
+        eStop  := f == 1 ? aStop  : bStop
+        eTgt   := f == 1 ? aTgt   : bTgt
+        eRR    := f == 1 ? aRR    : bRR
+        eIfvg  := f == 1 ? aIfvg  : false
+        if f == 1
+            bState := bState == 1 ? 2 : bState
+        else
+            aState := aState == 1 ? 2 : aState
+        eStage   := 3
+        eFillBar := bar_index
+        if not na(eEnLb)
+            label.set_y(eEnLb, eEntry)
+            label.set_y(eSlLb, eStop)
+            label.set_y(eTpLb, eTgt)
+            label.set_text(eTpLb, tpTxt(eTgt, eRR))
+            line.set_y1(eVLn, eEntry)
+            line.set_y2(eVLn, eTgt)
+            line.set_y1(eVLnS, eStop)
+            line.set_y2(eVLnS, eEntry)
+        string kF = (eDir == -1 ? "-" : "+") + (f == 2 ? "FVG (MSS)" : eIfvg ? "IFVG" : "FVG")
+        eRtLb := label.new(bar_index, eDir == -1 ? high + rtOff() : low - rtOff(), eDir == -1 ? "▽" : "△",
+             style = label.style_none, textcolor = eDir == -1 ? rtDnCol : rtUpCol, size = sizeOf(retestSize),
+             tooltip = "Zone retest — " + kF + " limit " + fmtP(eEntry))
+        keepB(eRtLb)
+        if alZT
+            alert("Zone retest — " + (eDir == -1 ? "short" : "long") + " limit " + fmtP(eEntry) + " touched (" + kF + ") | SL " + fmtP(eStop) +
+                 " | TP " + fmtP(eTgt) + " [" + curTag + "]", alert.freq_once_per_bar)
+// ─── Stacked-gap extension (v7.11; Merge mode only) ──────────────────────
+// While path A is armed and unfilled, a new gap in the same direction whose
+// first candle is within two bars of the chain's last gap extends the zone to
+// its near edge; the stop stays at the far edge. Runs at the bar close, after
+// the fill check, so a touch of the old limit fills on the old zone first. If
+// the wider zone no longer clears the R gate, the chain locks as it was.
+if mergeOn and barOK and eStage == 2 and aState == 1 and not aIfvg and not na(aChainEnd) and aChainEnd >= 0 and inExec
+    int nc = vB2   // c1 of the gap this candle completes
+    if nc > aChainEnd and openCount(aChainEnd, nc) <= 2
+        [xt, xb, x3] = gapAt(eDir, nc)
+        if not na(xt)
+            float nTop = math.max(aTop, xt)
+            float nBot = math.min(aBot, xb)
+            float nEn  = eDir == -1 ? nBot : nTop
+            // The stop stays beyond the first candle as the zone grows (v7.18).
+            float nSt  = aStop
+            [nT, nR] = tgtFor(eDir, nEn, nSt)
+            if not na(nT)
+                aTop := nTop
+                aBot := nBot
+                aEntry := nEn
+                aStop  := nSt
+                aTgt   := nT
+                aRR    := nR
+                aChainEnd := nc
+                aArmBar := bar_index
+                if not na(aBx)
+                    box.set_top(aBx, aTop)
+                    box.set_bottom(aBx, aBot)
+                    label.set_y(aLb, (aTop + aBot) / 2)
+                    line.set_y1(aCe, (aTop + aBot) / 2)
+                    line.set_y2(aCe, (aTop + aBot) / 2)
+                if ePath == 1
+                    eEntry := aEntry
+                    eStop  := aStop
+                    eTgt   := aTgt
+                    eRR    := aRR
+                    if not na(eEnLb)
+                        label.set_y(eEnLb, eEntry)
+                        label.set_y(eSlLb, eStop)
+                        label.set_y(eTpLb, eTgt)
+                        label.set_text(eTpLb, tpTxt(eTgt, eRR))
+                        line.set_y1(eVLn, eEntry)
+                        line.set_y2(eVLn, eTgt)
+                        line.set_y1(eVLnS, eStop)
+                        line.set_y2(eVLnS, eEntry)
+                fireAlert(alSU, "Setup ready (zone extended) — " + (eDir == -1 ? "short" : "long") + " limit " + fmtP(aEntry) + " | SL " + fmtP(aStop) +
+                     " | TP " + fmtP(aTgt) + " (" + str.tostring(aRR, "#.0") + "R) — " + (eDir == -1 ? "-" : "+") + "FVG" + (eRound >= 2 ? " · entry " + str.tostring(eRound) : ""))
+            else
+                aChainEnd := -1000000
+// ─── Stop and target on the tick (v7.28) ─────────────────────────────────
+// A platform closes the position the moment price touches the stop or the
+// target, so the engine does too: the trade comes off, the status changes and
+// the alert fires on the touch, not at the bar close. The EW close and every
+// close-based kill still act at the close.
+varip int xBar  = -1     // the live candle the first touch belongs to
+varip int xKind = 0      // 1 stop first, 2 target first, 3 both on one tick
+if eStage == 3 and bar_index > eFillBar and inExec and cmeOpen
+    bool hitS0 = eDir == -1 ? high >= eStop : low <= eStop
+    // v7.27: with a second target the trade runs to it; the first only marks.
+    float xT   = na(eTgt2) ? eTgt : eTgt2
+    bool hitT0 = eDir == -1 ? low <= xT : high >= xT
+    // Live, the first level touched wins and holds for the rest of the candle.
+    // On history there is no tick order: a candle through both is unclear.
+    bool live = barstate.isrealtime
+    if live
+        if xBar != bar_index
+            xBar  := bar_index
+            xKind := 0
+        if xKind == 0
+            xKind := hitS0 and hitT0 ? 3 : hitS0 ? 1 : hitT0 ? 2 : 0
+    bool hitS = live ? (xKind == 1 or xKind == 3) : hitS0
+    bool hitT = live ? (xKind == 2 or xKind == 3) : hitT0
+    if not na(eTgt2) and not eT1Hit and not hitS and (eDir == -1 ? low <= eTgt : high >= eTgt)
+        eT1Hit := true
+        if alTG
+            alert("TP1 reached — " + (eDir == -1 ? "short " : "long ") + fmtP(eTgt) + " (" + str.tostring(eRR, "#.0") + "R), running to TP2 " + fmtP(eTgt2) + " [" + curTag + "]", alert.freq_once_per_bar)
+    // The zone outlives the trade. A wick through the stop ends the trade
+    // only; the zone goes on two consecutive body closes through its far
+    // edge, counted from this bar in the kept-zone block below.
+    float zFar = eDir == -1 ? (ePath == 1 ? aTop : bTop) : (ePath == 1 ? aBot : bBot)
+    if hitS and hitT
+        eStage := 4
+        eMsg   := "Stop and target same bar · unclear"
+        clearTrade(true)
+    else if hitS
+        eStage := 4
+        eMsg   := "Stopped"
+        clearTrade(true)
+        if alSH
+            alert("Stop hit — " + (eDir == -1 ? "short " : "long ") + "SL " + fmtP(eStop) + " (-1R) [" + curTag + "]", alert.freq_once_per_bar)
+    else if hitT
+        eStage := 4
+        eMsg   := "Target reached (" + str.tostring(na(eTgt2) ? eRR : eRR2, "#.0") + "R)"
+        if alTG
+            alert("Target hit — " + (eDir == -1 ? "short " : "long ") + "TP " + fmtP(xT) + " (" + str.tostring(na(eTgt2) ? eRR : eRR2, "#.0") + "R) [" + curTag + "]", alert.freq_once_per_bar)
+    if hitS
+        zkDir := eDir
+        array.push(zkFar, zFar)
+        array.push(zkCnt, 0)
+        array.push(zkBx, ePath == 1 ? aBx : bBx)
+        array.push(zkLb, ePath == 1 ? aLb : bLb)
+        array.push(zkCe, ePath == 1 ? aCe : bCe)
+    if eStage == 4 and eRound >= 2
+        eMsg := eMsg + " · entry " + str.tostring(eRound)
+    // Re-entry: stopped with the CISD still holding. Re-open the setup
+    // and look for a new FVG that starts after this bar. No cap on the
+    // count; the CISD's own two-close rule is what ends it.
+    if hitS and not hitT and dirState == eDir and not deliveryDone
+        eRound   := eRound + 1
+        eStage   := 1
+        eMsg     := ""
+        eFromBar := bar_index + 1
+        eFillBar := na
+        ePath    := 0
+        aState   := 0
+        // A stopped path B must not stay armed: its old limit would fill again.
+        bState   := bState == 1 ? 2 : bState
+        aIfvg    := false
+        aChainEnd := na
+        aBx := na
+        aLb := na
+        aCe := na
+        eRtLb := na
+        eEnLb := na
+        eSlLb := na
+        eTpLb := na
+        eVLn  := na
+        eVLnS := na
+if barOK
+    // Before a fill: an armed path whose target trades first ends the setup,
+    // and so does a candle that touched a limit and its target together.
+    if eStage == 2 and (sameBarX or (aState == 1 and (eDir == -1 ? low <= aTgt : high >= aTgt)) or (bState == 1 and (eDir == -1 ? low <= bTgt : high >= bTgt)))
+        eStage := 4
+        eMsg   := sameBarX ? "Entry and target same bar · no trade" : "Target reached before entry"
+        aState := aState == 1 ? 2 : aState
+        bState := bState == 1 ? 2 : bState
+    // The EW close flattens at the bar close; stops and targets act on the
+    // tick (v7.28, above).
+    else if eStage == 3 and bar_index > eFillBar and not inExec
+        eStage := 4
+        eMsg   := "Flat at EW close " + fmtP(close[1]) + (eRound >= 2 ? " · entry " + str.tostring(eRound) : "")
+    // Live drawings run with the bar while their path is armed or filled.
+    if (eStage == 2 or eStage == 3) and inExec
+        if aState == 1 or (eStage == 3 and ePath == 1)
+            // A live zone runs with price, never shorter than its set length.
+            if not na(aBx)
+                int rA = math.max(bar_index, box.get_right(aBx))
+                box.set_right(aBx, rA)
+                label.set_x(aLb, rA)
+                line.set_x2(aCe, rA)
+        if bState == 1 or (eStage == 3 and ePath == 2)
+            if not na(bBx)
+                int rB = math.max(bar_index, box.get_right(bBx))
+                box.set_right(bBx, rB)
+                label.set_x(bLb, rB)
+                line.set_x2(bCe, rB)
+        if not na(eEnLb)
+            label.set_x(eEnLb, bar_index + TRADE_OFF)
+            label.set_x(eSlLb, bar_index + TRADE_OFF)
+            label.set_x(eTpLb, bar_index + TRADE_OFF)
+            line.set_x1(eVLn, bar_index + TRADE_OFF)
+            line.set_x2(eVLn, bar_index + TRADE_OFF)
+            line.set_x1(eVLnS, bar_index + TRADE_OFF)
+            line.set_x2(eVLnS, bar_index + TRADE_OFF)
+// ─── Second target (v7.27) ───────────────────────────────────────────────
+// With TP at EQ and TP at the opposite DR extreme both on, the trade's first
+// target is EQ (or the 0.705) and it runs on to the DR's far end. Both carry
+// their R on the bracket; the stop does not move.
+if eStage == 2 or eStage == 3
+    [t2v, r2v] = tgt2For(eDir, eEntry, eStop, eTgt)
+    eTgt2 := t2v
+    eRR2  := r2v
+    if lvlOn and not na(eEnLb)
+        if not na(eTgt2)
+            if na(eTp2Lb)
+                eTp2Lb := label.new(bar_index + TRADE_OFF, eTgt2, tpTxt(eTgt2, eRR2), style = label.style_label_center,
+                     color = chart.bg_color, textcolor = color.new(#2962FF, 0), size = size.small)
+                keepB(eTp2Lb)
+            else
+                label.set_xy(eTp2Lb, inExec ? bar_index + TRADE_OFF : label.get_x(eTp2Lb), eTgt2)
+                label.set_text(eTp2Lb, tpTxt(eTgt2, eRR2))
+            line.set_y2(eVLn, eTgt2)
+        else if not na(eTp2Lb)
+            label.delete(eTp2Lb)
+            eTp2Lb := na
+else if eStage == 0 or eStage == 1
+    eTgt2  := na
+    eRR2   := na
+    eT1Hit := false
+    eTp2Lb := na
+// ─── Zones left by stopped trades (v7.14; two-close rule since v7.15) ────
+// Each runs with the bar like any live PD array and comes off on two
+// consecutive body closes through its far edge. A wick breaches nothing. All of
+// them go if the CISD they belong to is killed. At the EW close they freeze
+// where they are, like every other session drawing.
+if barOK and array.size(zkBx) > 0
+    bool zkAll = dirState != zkDir
+    for i = array.size(zkBx) - 1 to 0
+        bool zThru = zkDir == -1 ? close > array.get(zkFar, i) : close < array.get(zkFar, i)
+        int  zN    = zThru ? array.get(zkCnt, i) + 1 : 0
+        array.set(zkCnt, i, zN)
+        if zkAll or zN >= killCloses
+            box.delete(array.get(zkBx, i))
+            label.delete(array.get(zkLb, i))
+            line.delete(array.get(zkCe, i))
+            array.remove(zkFar, i)
+            array.remove(zkCnt, i)
+            array.remove(zkBx, i)
+            array.remove(zkLb, i)
+            array.remove(zkCe, i)
+        else if inExec
+            if not na(array.get(zkBx, i))
+                int rK = math.max(bar_index, box.get_right(array.get(zkBx, i)))
+                box.set_right(array.get(zkBx, i), rK)
+                label.set_x(array.get(zkLb, i), rK)
+                line.set_x2(array.get(zkCe, i), rK)
+    if not inExec
+        array.clear(zkFar)
+        array.clear(zkCnt)
+        array.clear(zkBx)
+        array.clear(zkLb)
+        array.clear(zkCe)
+// ─── Extend session reference drawings (liquidity levels + EQ) ───────────
+// Hardcoded: extension stops at execution-window close for every session;
+// drawings freeze at their final position until the next session reset.
+if barOK and liqClosed and inExec
+    if not na(eqLn)
+        line.set_x2(eqLn, bar_index)
+    if array.size(fibLn) > 0
+        for i = 0 to array.size(fibLn) - 1
+            line.set_x2(array.get(fibLn, i), bar_index)
+            label.set_x(array.get(fibLb, i), bar_index + NAME_OFF)
+    if array.size(fibVb) > 0
+        for i = 0 to array.size(fibVb) - 1
+            label.set_x(array.get(fibVb, i), bar_index + VAL_OFF)
+    if not na(fibBandBox)
+        box.set_right(fibBandBox, bar_index)
+    if not na(liqHiLn)
+        line.set_x2(liqHiLn, bar_index)
+    if not na(liqLoLn)
+        line.set_x2(liqLoLn, bar_index)
+    if not na(swLvlLn)
+        line.set_x2(swLvlLn, bar_index)
+    if not na(eqNameLb)
+        label.set_x(eqNameLb, bar_index + NAME_OFF)
+    if not na(eqValLb)
+        label.set_x(eqValLb, bar_index + VAL_OFF)
+    if not na(liqHiNameLb)
+        label.set_x(liqHiNameLb, bar_index + NAME_OFF)
+    if not na(liqLoNameLb)
+        label.set_x(liqLoNameLb, bar_index + NAME_OFF)
+    if not na(liqHiValLb)
+        label.set_x(liqHiValLb, bar_index + VAL_OFF)
+    if not na(liqLoValLb)
+        label.set_x(liqLoValLb, bar_index + VAL_OFF)
+// ─── Status block ────────────────────────────────────────────────────────
+// v1.02: brief, two lines. Status is where the setup stands; Next is the one
+// thing it is waiting for. Short words only, so the block stays narrow.
+statusPair() =>
+    string st = ""
+    string nx = ""
+    string dn = dirState == -1 ? "-CISD" : "+CISD"
+    string kF = ePath == 2 ? "MSS FVG" : eIfvg ? "IFVG" : "FVG"
+    string rd = eRound >= 2 ? " · entry " + str.tostring(eRound) : ""
+    if inLiq
+        st := "DR forming"
+    else if not liqClosed
+        st := "Waiting for DR"
+    else if not inExec
+        st := "EW closed"
+        nx := eMsg
+    else if eStage == 3
+        st := "Filled · " + str.tostring(eRR, "#.0") + "R" + (na(eTgt2) ? "" : " / " + str.tostring(eRR2, "#.0") + "R")
+        nx := eT1Hit ? "TP1 reached" : kF + rd
+    else if eStage == 2
+        st := "Waiting for retest"
+        nx := (aState == 1 and bState == 1 ? (aIfvg ? "IFVG" : "FVG") + " / MSS FVG" : kF) + rd
+    else if eStage == 1
+        st := dn + (eRound >= 2 ? " · stopped" : "")
+        nx := "Waiting for FVG"
+    else if deliveryDone
+        st := "Delivery complete"
+        nx := eStage == 4 and str.startswith(eMsg, "Target reached") ? eMsg : ""
+    else if eStage == 4 and dirState != 0
+        st := dn
+        nx := eMsg
+    else if loState == 2 and hiState == 2
+        st := "Expanded both sides"
+        nx := "Define a new DR"
+    else if loState == 2 or hiState == 2
+        st := loState == 2 ? "Expanded below DR" : "Expanded above DR"
+        nx := (loState == 2 and sweptHi and hiState == 0) ? "Waiting for -CISD" : (hiState == 2 and sweptLo and loState == 0) ? "Waiting for +CISD" : loState == 2 ? "Long side off" : "Short side off"
+    else if loState == 1 or hiState == 1
+        st := loState == 1 ? "Closed below DR L" : "Closed above DR H"
+        nx := "Waiting for a return"
+    else if sweptHi and sweptLo
+        st := "Both sides swept"
+        nx := "Waiting for CISD"
+    else if sweptHi
+        st := "DR H swept" + (gapHi ? " on gap" : "")
+        nx := huntDn != "" ? huntDn : "Waiting for -CISD"
+    else if sweptLo
+        st := "DR L swept" + (gapLo ? " on gap" : "")
+        nx := huntUp != "" ? huntUp : "Waiting for +CISD"
+    else
+        st := "Waiting for sweep"
+    [st, nx]
+// ─── Manual trade levels (v7.21) ─────────────────────────────────────────
+// Your typed levels, drawn the same way as the engine's trade: labels on a
+// dotted bracket in the trade column, following the last candle. Only in
+// Manual mode, so the chart never carries two trades.
+var line  mVLn  = na
+var line  mVLnS = na
+var label mEnLb = na
+var label mSlLb = na
+var label mTpLb = na
+if barstate.islast and manOn and (calcLong or calcShort)
+    int    mx  = bar_index + TRADE_OFF
+    string mTp = "TP " + str.tostring(calcR, "#.0") + "R"
+    if na(mEnLb)
+        mVLn  := line.new(mx, calcEn, mx, calcTp, color = color.new(#2962FF, 0), style = line.style_dotted, width = 1)
+        mVLnS := line.new(mx, calcSl, mx, calcEn, color = color.new(#F23645, 0), style = line.style_dotted, width = 1)
+        mEnLb := label.new(mx, calcEn, "Entry", style = label.style_label_center,
+             color = chart.bg_color, textcolor = color.new(#2962FF, 0), size = size.small)
+        mSlLb := label.new(mx, calcSl, "SL -1R", style = label.style_label_center,
+             color = chart.bg_color, textcolor = color.new(#F23645, 0), size = size.small)
+        mTpLb := label.new(mx, calcTp, mTp, style = label.style_label_center,
+             color = chart.bg_color, textcolor = color.new(#2962FF, 0), size = size.small)
+    else
+        line.set_xy1(mVLn, mx, calcEn)
+        line.set_xy2(mVLn, mx, calcTp)
+        line.set_xy1(mVLnS, mx, calcSl)
+        line.set_xy2(mVLnS, mx, calcEn)
+        label.set_xy(mEnLb, mx, calcEn)
+        label.set_xy(mSlLb, mx, calcSl)
+        label.set_xy(mTpLb, mx, calcTp)
+        label.set_text(mTpLb, mTp)
+// ─── Status table (v1.02) ────────────────────────────────────────────────
+// Label | value rows, one short phrase each, in order:
+//   Status  where the setup stands
+//   Next    what it is waiting for            (when there is one)
+//   Swept   your swept level: armed or not    (when ticked)
+//   Clock   CME / 24/7, and price ignored while CME was closed (clocked perps)
+//   Long 2.7R | Entry | SL | TP               (armed or filled trade, or Manual)
+// Rebuilt on the last bar so the rows always sit together.
+var table tbl = na
+if statusOn and barstate.islast
+    [stS, stN] = statusPair()
+    array<string> rLb = array.new_string()
+    array<string> rVl = array.new_string()
+    array.push(rLb, "Status")
+    array.push(rVl, stS)
+    if stN != ""
+        array.push(rLb, "Next")
+        array.push(rVl, stN)
+    if sweptOn and sweptLvl > 0
+        string swV = not liqClosed ? fmtP(sweptLvl) + " · pending" : swState == 1 or swState == 2 ? fmtP(sweptLvl) + " · armed" : swState >= 3 ? fmtP(sweptLvl) + " · not taken" : ""
+        if swV != ""
+            array.push(rLb, "Swept")
+            array.push(rVl, swV)
+    if onCmeClock
+        string ig = not na(haltLo) and not na(haltHi) ? " · closed hours ignored" : not na(haltLo) ? " · " + fmtP(haltLo) + " ignored" : not na(haltHi) ? " · " + fmtP(haltHi) + " ignored" : ""
+        array.push(rLb, "Clock")
+        array.push(rVl, cmeClockOn ? "CME" + ig : "24/7")
+    bool  tEng = lvlOn and (eStage == 2 or eStage == 3) and ePath != 0
+    bool  tMan = manOn and calcSet
+    int   nR   = array.size(rLb)
+    if not na(tbl)
+        table.delete(tbl)
+    tbl := table.new(posOf(stPos), 7, nR + 1,
+         bgcolor = stBgC, border_width = stBorderW, border_color = stBorderC,
+         frame_color = stBorderC, frame_width = stBorderW)
+    tSz = sizeOf(stSize)
+    for i = 0 to nR - 1
+        table.cell(tbl, 0, i, array.get(rLb, i), text_color = stLblC, text_size = tSz, text_halign = text.align_left)
+        table.cell(tbl, 1, i, array.get(rVl, i), text_color = stTxtC, text_size = tSz, text_halign = text.align_left)
+        table.merge_cells(tbl, 1, i, 6, i)
+    if tEng or tMan
+        int    rT   = nR
+        bool   tOk  = tEng or calcLong or calcShort
+        int    tDir = tEng ? eDir : calcLong ? 1 : -1
+        float  tR   = tEng ? eRR : calcR
+        bool   t2   = tEng and not na(eTgt2)
+        string tHd  = not tOk ? "Check SL / TP" : (tMan ? "Manual " + (tDir == -1 ? "short " : "long ") : (tDir == -1 ? "Short " : "Long ")) + str.tostring(tR, "#.0") + "R" + (t2 ? " / " + str.tostring(eRR2, "#.0") + "R" : "")
+        color  tHc  = not tOk ? obBearCol : tDir == -1 ? obBearCol : obBullCol
+        table.cell(tbl, 0, rT, tHd, text_color = tHc, text_size = tSz, text_halign = text.align_left)
+        table.cell(tbl, 1, rT, "Entry", text_color = stLblC, text_size = tSz)
+        table.cell(tbl, 2, rT, fmtP(tEng ? eEntry : calcEn), text_color = stTxtC, text_size = tSz)
+        table.cell(tbl, 3, rT, "SL", text_color = stLblC, text_size = tSz)
+        table.cell(tbl, 4, rT, fmtP(tEng ? eStop : calcSl), text_color = stTxtC, text_size = tSz)
+        table.cell(tbl, 5, rT, "TP", text_color = stLblC, text_size = tSz)
+        table.cell(tbl, 6, rT, fmtP(tEng ? eTgt : calcTp) + (t2 ? " / " + fmtP(eTgt2) : ""), text_color = stTxtC, text_size = tSz)
+// v1.02: remembered for the next candle's reopen-gap test.
+if barOK
+    pvClose := close
