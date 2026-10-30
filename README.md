@@ -334,14 +334,15 @@ historical bars or in Bar Replay.
 
 ---
 
-## Perpetual futures and the CME clock
+## Perpetual futures and CME hours
 
 | Symbol | Mirrors |
 |---|---|
 | `HIP3XYZ:*` (every trade.xyz market: XYZ100, SP500, GOLD, …) | Nasdaq, S&P, gold, … |
+| Any ticker containing `XYZ100` | Nasdaq |
 | `BINANCE:CLUSDT.P` | Crude oil |
 
-**Hold perpetual futures to the CME clock** (on by default) runs these on the
+**CME hours only** (on by default) runs these on the
 CME calendar: Friday 17:00 to Sunday 18:00 New York and the daily 17:00–18:00
 halt are skipped. The DR and EW carry through the halt, and swings, gaps and
 every scan read only the candles CME prints. Untick it to trade the perp's 24/7
