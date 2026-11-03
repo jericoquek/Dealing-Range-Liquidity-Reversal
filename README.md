@@ -1,4 +1,4 @@
-[README_v1.12.md](https://github.com/user-attachments/files/34303300/README_v1.12.md)
+[README_v1.13.md](https://github.com/user-attachments/files/34307326/README_v1.13.md)
 # Dealing Range Liquidity Reversal
 
 *Formerly Session-Based Liquidity Reversals. It stopped being about the Asia,
@@ -18,7 +18,7 @@ filters, no point thresholds and nothing tuned to make past sessions look good.
 
 ### Status of this release
 
-v1.12. A working build, not a finished one.
+v1.13. A working build, not a finished one.
 
 - **Checked against my marks:** 13 Oct 2026 XYZ100 on 1h, 15m, 5m, 3m and 2m, and
   14 Oct 2026 XYZ100 on 5m.
@@ -363,13 +363,28 @@ SL and TP are just not drawn.
 
 ## SMT
 
-A related market is measured over the same DR window. When your DR extreme is
-swept in the EW and the pair holds its own, that's SMT. It never gates a trade.
+Up to two related markets are measured over the same DR window, each on its
+own. When your DR extreme is swept in the EW and a pair holds its own, that's
+SMT against that pair. It never gates a trade.
 
-- **Auto pairs:** XYZ100 / SP500 on trade.xyz, MNQ / MES, NQ / ES, GC / SI. Or
-  pick your own.
-- Shown in the **SMT** row, and as a line from the pair's DR-extreme candle
-  (time-aligned) to your raid extreme, marked `+SMT` / `-SMT`.
+| Chart | Pair 1 | Pair 2 |
+|---|---|---|
+| YM | ES | NQ |
+| MYM | MES | MNQ |
+| NQ | ES | YM |
+| MNQ | MES | MYM |
+| ES | NQ | YM |
+| MES | MNQ | MYM |
+| GC / SI | the other one | — |
+| XYZ100 / SP500 (trade.xyz) | the other one | — |
+
+- **Pair 1** and **Pair 2** each have an on/off tick and a symbol box. Leave the
+  box blank for auto, or type your own pair.
+- The **SMT** row names the pair that held: `+SMT · ES`, or `+SMT · ES · NQ` when
+  both did.
+- On the chart, a line runs from the pair's DR-extreme candle (time-aligned) to
+  your raid extreme, labelled with the pair: `+SMT ES`. When both pairs made
+  their extreme on the same candle, one line carries both names.
 - A side armed by the Swept level is left out: that sweep is of your key level,
   not of the DR. No pair data in the EW is not a hold.
 
@@ -385,7 +400,7 @@ Short rows, in order. A row only shows when it has something to say.
 | **Next** | The one thing it's waiting for: `Close > 29,270` · `No leg into sweep` · `Waiting for FVG` · `FVG / MSS FVG` · `TP1 reached · SL at entry` · `No trade · +FVG risk too wide` |
 | **EW** | Time left: `ends in 2h 15m`, or `C2 · ends in 40m` in Previous-candle mode |
 | **Swept** | Your swept level: `29,094 · armed` · `not taken` · `pending`, or `PDL 29,010 · armed` / `Auto · none taken` |
-| **SMT** | `+SMT · SP500 held` · `No SMT · SP500 swept too` · `no SP500 data in EW` |
+| **SMT** | `+SMT · ES` · `+SMT · ES · NQ` · `No SMT · ES, NQ swept too` · `no NQ data in EW` · `+SMT · only NQ swept` |
 | **Score** | While a trade is armed or open: e.g. `3/5`. Hover for the list: SMT held, key level taken, entry in discount / premium, FVG (not IFVG), first entry. SMT and key level count only when switched on. Display only |
 | **Clock** | On clocked perps only: `CME`, `CME · 28,890 ignored` (price went beyond the DR while CME was closed), or `24/7` |
 | **Trade** | `Long 2.7R` with Entry, SL and TP, or `Manual long 4.6R` in Manual mode |
@@ -465,6 +480,10 @@ The script stops with a message if:
 ---
 
 ## Version history
+
+**v1.13:** SMT against two pairs at once, naming the one that held. Auto pairs
+cover the ES / NQ / YM triad on CME index futures, micros included. GC / SI and
+the trade.xyz pair stay one pair. Settings need a reset (new inputs).
 
 **v1.12:** **Hold perpetual futures to the CME clock** is now **CME hours only**,
 with the tooltip shared across my indicators. Same behaviour, default on.
