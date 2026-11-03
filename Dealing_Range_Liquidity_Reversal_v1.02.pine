@@ -1,6 +1,6 @@
 //@version=6
 // ─────────────────────────────────────────────────────────────────────────
-// Dealing Range Liquidity Reversal  v1.12
+// Dealing Range Liquidity Reversal  v1.13
 //
 // One dealing range (DR) per chart, on the daily schedule or fixed by date.
 // In the execution window (EW) a sweep of the DR arms the reversal and the
@@ -75,6 +75,11 @@
 // higher.
 //
 // Versions
+//   v1.13 SMT against two pairs at once. Auto: the index triad on CME futures
+//         (YM: ES and NQ; MYM: MES and MNQ; NQ: ES and YM; MNQ: MES and MYM;
+//         ES: NQ and YM; MES: MNQ and MYM); GC / SI and the trade.xyz pair stay
+//         one pair. Each pair is judged alone; the SMT row and the chart name
+//         the pair that held. Score counts SMT once if either held.
 //   v1.12 Setting renamed "Hold perpetual futures to the CME clock" -> "CME
 //         hours only", with the tooltip shared across the indicators. Default
 //         on; behaviour unchanged.
@@ -424,10 +429,14 @@ fBandOn  = input.bool(true, "Shade the band", group = grpF, inline = "fbs")
 fBandCol = input.color(color.new(#FFEE58, 90), "", group = grpF, inline = "fbs")
 // ─── SMT (v1.04) ──────────────────────────────────────────────────────────
 grpSmt    = "SMT"
-smtOn     = input.bool(true, "SMT against", group = grpSmt, inline = "sm",
-     tooltip = "Compares the sweep with a related market over the same DR window. +SMT: your DR low was swept and the pair held its own DR low, or the pair swept its low and yours held. -SMT: the same at the highs. Shown in the status block; when your side was swept, also as a line from your DR extreme to the raid, marked +SMT or -SMT (when only the pair swept there is nothing on your chart to mark). It never gates a trade. Leave the pair blank for auto: XYZ100 and SP500 on trade.xyz, MNQ and MES, NQ and ES, GC and SI.")
+smtOn     = input.bool(true, "Pair 1", group = grpSmt, inline = "sm",
+     tooltip = "Compares the sweep with related markets over the same DR window, each pair on its own. +SMT: your DR low was swept and that pair held its own DR low, or the pair swept its low and yours held. -SMT: the same at the highs. Shown in the status block, naming the pair; when your side was swept, also as a line from the pair's DR-extreme candle to your raid, marked +SMT and the pair. It never gates a trade. Leave a pair blank for auto. Pair 1: ES for YM and NQ, NQ for ES, MES for MYM and MNQ, MNQ for MES, SI for GC, GC for SI, SP500 / XYZ100 on trade.xyz.")
 smtPairIn = input.symbol("", "", group = grpSmt, inline = "sm")
 smtCol    = input.color(color.new(#9c27b0, 0), "", group = grpSmt, inline = "sm")
+// v1.13: a second pair, for the index triad.
+smtOn2     = input.bool(true, "Pair 2", group = grpSmt, inline = "sm2",
+     tooltip = "Leave blank for auto: NQ for YM, YM for NQ and ES, MNQ for MYM, MYM for MNQ and MES. No auto second pair on GC, SI or the trade.xyz markets.")
+smtPairIn2 = input.symbol("", "", group = grpSmt, inline = "sm2")
 // ─── Status block ─────────────────────────────────────────────────────────
 grpT = "Status block"
 statusOn  = input.bool(true, "Show status block", group = grpT,
@@ -527,8 +536,15 @@ string tkr     = syminfo.ticker
 string smtAuto = syminfo.prefix == "HIP3XYZ" and str.contains(tkr, "XYZ100") ? "HIP3XYZ:SP500USDC.P" :
      syminfo.prefix == "HIP3XYZ" and str.contains(tkr, "SP500") ? "HIP3XYZ:XYZ100USDC.P" :
      str.startswith(tkr, "MNQ") ? "CME_MINI:MES1!" : str.startswith(tkr, "MES") ? "CME_MINI:MNQ1!" :
+     str.startswith(tkr, "MYM") ? "CME_MINI:MES1!" :
      str.startswith(tkr, "NQ") ? "CME_MINI:ES1!" : str.startswith(tkr, "ES") ? "CME_MINI:NQ1!" :
+     str.startswith(tkr, "YM") ? "CME_MINI:ES1!" :
      str.startswith(tkr, "GC") ? "COMEX:SI1!" : str.startswith(tkr, "SI") ? "COMEX:GC1!" : ""
+// v1.13: the third index of the triad.
+string smtAuto2 = str.startswith(tkr, "MNQ") ? "CBOT_MINI:MYM1!" : str.startswith(tkr, "MES") ? "CBOT_MINI:MYM1!" :
+     str.startswith(tkr, "MYM") ? "CME_MINI:MNQ1!" :
+     str.startswith(tkr, "NQ") ? "CBOT_MINI:YM1!" : str.startswith(tkr, "ES") ? "CBOT_MINI:YM1!" :
+     str.startswith(tkr, "YM") ? "CME_MINI:NQ1!" : ""
 string smtSym  = smtPairIn != "" ? smtPairIn : smtAuto
 bool   smtWant = smtOn and smtSym != ""
 [pH, pL] = request.security(smtWant ? smtSym : syminfo.tickerid, timeframe.period, [high, low], gaps = barmerge.gaps_on, ignore_invalid_symbol = true)
@@ -538,6 +554,15 @@ if smtWant and not na(pH)
 bool   smtLive = smtWant and pSeen
 array<string> smtParts = str.split(smtSym, ":")
 string pName = str.replace_all(str.replace_all(array.get(smtParts, array.size(smtParts) - 1), "USDC.P", ""), "1!", "")
+string smtSym2  = smtPairIn2 != "" ? smtPairIn2 : smtAuto2
+bool   smtWant2 = smtOn2 and smtSym2 != ""
+[pH2, pL2] = request.security(smtWant2 ? smtSym2 : syminfo.tickerid, timeframe.period, [high, low], gaps = barmerge.gaps_on, ignore_invalid_symbol = true)
+var bool pSeen2 = false
+if smtWant2 and not na(pH2)
+    pSeen2 := true
+bool   smtLive2 = smtWant2 and pSeen2
+array<string> smtParts2 = str.split(smtSym2, ":")
+string pName2 = str.replace_all(str.replace_all(array.get(smtParts2, array.size(smtParts2) - 1), "USDC.P", ""), "1!", "")
 var float pLiqHi  = na      // pair's high / low over the DR window
 var float pLiqLo  = na
 // v1.05: where the pair made them, and your high / low on that candle, so
@@ -568,6 +593,31 @@ var label smtLoLb = na
 var label smtHiLb = na
 var line  smtLoLn = na      // v1.05: DR extreme to raid extreme
 var line  smtHiLn = na
+// v1.13: the same for pair 2.
+var float pLiqHi2 = na
+var float pLiqLo2 = na
+var int   pLiqHiBar2 = na
+var int   pLiqLoBar2 = na
+var float pHiOurPx2  = na
+var float pLoOurPx2  = na
+var int   spHiBar2 = na
+var int   spLoBar2 = na
+var float spHiOur2 = na
+var float spLoOur2 = na
+var int   pdPHiBar2 = na
+var int   pdPLoBar2 = na
+var float pdPHiOur2 = na
+var float pdPLoOur2 = na
+var float pRaidHi2 = na
+var float pRaidLo2 = na
+var float spHi2    = na
+var float spLo2    = na
+var float pdPHi2   = na
+var float pdPLo2   = na
+var label smtLoLb2 = na
+var label smtHiLb2 = na
+var line  smtLoLn2 = na
+var line  smtHiLn2 = na
 // ─── Session windows ──────────────────────────────────────────────────────
 // The Dated DR starts once, on the first CME-valid candle at or after From,
 // so a From inside the halt or the weekend still resets on a real candle.
@@ -1036,6 +1086,12 @@ if candleOn and not datedLive and cmeOpen
                 pdPLoBar := spLoBar
                 pdPHiOur := spHiOur
                 pdPLoOur := spLoOur
+                pdPHi2    := spHi2
+                pdPLo2    := spLo2
+                pdPHiBar2 := spHiBar2
+                pdPLoBar2 := spLoBar2
+                pdPHiOur2 := spHiOur2
+                pdPLoOur2 := spLoOur2
                 cycStart := true
                 cycOn    := true
                 cycN     := 1
@@ -1060,6 +1116,12 @@ if candleOn and not datedLive and cmeOpen
         spLoBar  := na(pL) ? int(na) : bar_index
         spHiOur  := high
         spLoOur  := low
+        spHi2     := pH2
+        spLo2     := pL2
+        spHiBar2  := na(pH2) ? int(na) : bar_index
+        spLoBar2  := na(pL2) ? int(na) : bar_index
+        spHiOur2  := high
+        spLoOur2  := low
     else
         if high > shHi
             shHi    := high
@@ -1078,6 +1140,14 @@ if candleOn and not datedLive and cmeOpen
             spLo := pL
             spLoBar := bar_index
             spLoOur := low
+        if not na(pH2) and (na(spHi2) or pH2 > spHi2)
+            spHi2 := pH2
+            spHiBar2 := bar_index
+            spHiOur2 := high
+        if not na(pL2) and (na(spLo2) or pL2 < spLo2)
+            spLo2 := pL2
+            spLoBar2 := bar_index
+            spLoOur2 := low
     if not cycOn
         inExec := false
 if (inLiq and not inLiq[1]) or (datedFirst and inLiq) or cycStart   // a liquidity session begins: full reset.
@@ -1131,6 +1201,18 @@ if (inLiq and not inLiq[1]) or (datedFirst and inLiq) or cycStart   // a liquidi
     smtHiLb    := na
     smtLoLn    := na
     smtHiLn    := na
+    pLiqHi2     := pH2
+    pLiqLo2     := pL2
+    pLiqHiBar2  := na(pH2) ? int(na) : bar_index
+    pLiqLoBar2  := na(pL2) ? int(na) : bar_index
+    pHiOurPx2   := high
+    pLoOurPx2   := low
+    pRaidHi2    := na
+    pRaidLo2    := na
+    smtLoLb2    := na
+    smtHiLb2    := na
+    smtLoLn2    := na
+    smtHiLn2    := na
     gapLo      := false
     gapHi      := false
     haltLo     := na
@@ -1217,6 +1299,14 @@ else if inLiq and cmeOpen
         pLiqLo := pL
         pLiqLoBar := bar_index
         pLoOurPx  := low
+    if not na(pH2) and (na(pLiqHi2) or pH2 > pLiqHi2)
+        pLiqHi2 := pH2
+        pLiqHiBar2 := bar_index
+        pHiOurPx2  := high
+    if not na(pL2) and (na(pLiqLo2) or pL2 < pLiqLo2)
+        pLiqLo2 := pL2
+        pLiqLoBar2 := bar_index
+        pLoOurPx2  := low
 // v1.03: a candle cycle's DR is the closed candle, set in one step.
 if cycStart
     liqHigh      := pdHi
@@ -1233,6 +1323,12 @@ if cycStart
     pLiqLoBar    := pdPLoBar
     pHiOurPx     := pdPHiOur
     pLoOurPx     := pdPLoOur
+    pLiqHi2       := pdPHi2
+    pLiqLo2       := pdPLo2
+    pLiqHiBar2    := pdPHiBar2
+    pLiqLoBar2    := pdPLoBar2
+    pHiOurPx2     := pdPHiOur2
+    pLoOurPx2     := pdPLoOur2
     drKPDH       := pdKPDH
     drKPDL       := pdKPDL
     drKPWH       := pdKPWH
@@ -1485,6 +1581,10 @@ if inExec and cmeOpen and liqClosed
         pRaidHi := na(pRaidHi) ? pH : math.max(pRaidHi, pH)
     if not na(pL)
         pRaidLo := na(pRaidLo) ? pL : math.min(pRaidLo, pL)
+    if not na(pH2)
+        pRaidHi2 := na(pRaidHi2) ? pH2 : math.max(pRaidHi2, pH2)
+    if not na(pL2)
+        pRaidLo2 := na(pRaidLo2) ? pL2 : math.min(pRaidLo2, pL2)
 bool pOk     = smtLive and liqClosed and not na(pLiqHi) and not na(pLiqLo)
 bool pTookLo = pOk and not na(pRaidLo) and pRaidLo < pLiqLo
 bool pTookHi = pOk and not na(pRaidHi) and pRaidHi > pLiqHi
@@ -1494,58 +1594,71 @@ bool smtBull = pOk and not armLo and sweptLo and not na(pRaidLo) and not pTookLo
 bool smtBear = pOk and not armHi and sweptHi and not na(pRaidHi) and not pTookHi
 bool smtBullP = pOk and not sweptLo and pTookLo      // the pair swept, yours held
 bool smtBearP = pOk and not sweptHi and pTookHi
-// v1.05: a line from your DR extreme to the raid extreme, with +SMT / -SMT
-// centred under (over) it, line and text in the one swatch. It follows the
-// raid while the pair holds, and comes off if the pair takes its level too.
-if barOK and inExec and liqClosed and pOk
-    if smtBull
-        // Labelled like +CISD / +FVG: same size, no background, the line's
-        // colour. Anchored at the line's midpoint and hung below-left of it:
-        // a falling line runs above-left of that corner, so it never cuts
-        // through the text at any slope. (Pine text can't follow the angle.)
-        // v1.05: time-aligned, the line starts on the pair's DR-low candle,
-        // at your low on that candle (falls back to your own DR low).
-        int   sLoB = na(pLiqLoBar) or na(pLoOurPx) ? liqLoBar : pLiqLoBar
-        float sLoP = na(pLiqLoBar) or na(pLoOurPx) ? liqLow : pLoOurPx
-        int   smX = int(math.round((sLoB + raidLoBar) / 2))
-        float smY = (sLoP + raidLo) / 2
-        if na(smtLoLn)
-            smtLoLn := line.new(clampX(sLoB), sLoP, clampX(raidLoBar), raidLo, color = smtCol, width = 1)
-            smtLoLb := label.new(clampX(smX), smY, "+SMT", style = label.style_label_upper_right,
-                 color = color.new(smtCol, 100), textcolor = smtCol, size = size.small,
-                 tooltip = "+SMT: " + pName + " held its DR low")
-            keepL(smtLoLn)
-            keepB(smtLoLb)
+// v1.13: pair 2, judged alone.
+bool pOk2     = smtLive2 and liqClosed and not na(pLiqHi2) and not na(pLiqLo2)
+bool pTookLo2 = pOk2 and not na(pRaidLo2) and pRaidLo2 < pLiqLo2
+bool pTookHi2 = pOk2 and not na(pRaidHi2) and pRaidHi2 > pLiqHi2
+bool smtBull2 = pOk2 and not armLo and sweptLo and not na(pRaidLo2) and not pTookLo2
+bool smtBear2 = pOk2 and not armHi and sweptHi and not na(pRaidHi2) and not pTookHi2
+bool smtBullP2 = pOk2 and not sweptLo and pTookLo2
+bool smtBearP2 = pOk2 and not sweptHi and pTookHi2
+// v1.05: a line from the pair's DR-extreme candle (time-aligned, at your
+// high / low there; your own DR extreme if the pair has no candle there) to
+// the raid extreme, with +SMT / -SMT and the pair's name hung off its
+// midpoint, line and text in one swatch, so a sloped line never cuts the
+// text. It follows the raid while the pair holds and comes off if the pair
+// takes its level too. v1.13: one per pair; when both pairs' extremes sit on
+// the same candle, one line carries both names. Drawn by smtSide (the main
+// body has a size limit).
+smtSide(bool hold, bool took, line ln, label lb, int aB, float aP, int rB, float rP, string txt, string tip, bool isLo) =>
+    line  l2 = ln
+    label b2 = lb
+    if hold
+        int   mx = int(math.round((aB + rB) / 2))
+        float my = (aP + rP) / 2
+        if na(l2)
+            l2 := line.new(clampX(aB), aP, clampX(rB), rP, color = smtCol, width = 1)
+            b2 := label.new(clampX(mx), my, txt, style = isLo ? label.style_label_upper_right : label.style_label_lower_right,
+                 color = color.new(smtCol, 100), textcolor = smtCol, size = size.small, tooltip = tip)
+            keepL(l2)
+            keepB(b2)
         else
-            line.set_xy2(smtLoLn, clampX(raidLoBar), raidLo)
-            label.set_xy(smtLoLb, clampX(smX), smY)
-    else if not na(smtLoLn) and pTookLo
-        line.delete(smtLoLn)
-        label.delete(smtLoLb)
-        smtLoLn := na
-        smtLoLb := na
-    if smtBear
-        // Mirror: hung above-left of the midpoint; a rising line runs
-        // below-left of that corner.
-        int   sHiB = na(pLiqHiBar) or na(pHiOurPx) ? liqHiBar : pLiqHiBar
-        float sHiP = na(pLiqHiBar) or na(pHiOurPx) ? liqHigh : pHiOurPx
-        int   smX2 = int(math.round((sHiB + raidHiBar) / 2))
-        float smY2 = (sHiP + raidHi) / 2
-        if na(smtHiLn)
-            smtHiLn := line.new(clampX(sHiB), sHiP, clampX(raidHiBar), raidHi, color = smtCol, width = 1)
-            smtHiLb := label.new(clampX(smX2), smY2, "-SMT", style = label.style_label_lower_right,
-                 color = color.new(smtCol, 100), textcolor = smtCol, size = size.small,
-                 tooltip = "-SMT: " + pName + " held its DR high")
-            keepL(smtHiLn)
-            keepB(smtHiLb)
-        else
-            line.set_xy2(smtHiLn, clampX(raidHiBar), raidHi)
-            label.set_xy(smtHiLb, clampX(smX2), smY2)
-    else if not na(smtHiLn) and pTookHi
-        line.delete(smtHiLn)
-        label.delete(smtHiLb)
-        smtHiLn := na
-        smtHiLb := na
+            line.set_xy2(l2, clampX(rB), rP)
+            label.set_xy(b2, clampX(mx), my)
+            label.set_text(b2, txt)
+    else if took and not na(l2)
+        line.delete(l2)
+        label.delete(b2)
+        l2 := na
+        b2 := na
+    [l2, b2]
+if barOK and inExec and liqClosed and (pOk or pOk2)
+    int   aLo1 = na(pLiqLoBar) or na(pLoOurPx) ? liqLoBar : pLiqLoBar
+    float vLo1 = na(pLiqLoBar) or na(pLoOurPx) ? liqLow : pLoOurPx
+    int   aLo2 = na(pLiqLoBar2) or na(pLoOurPx2) ? liqLoBar : pLiqLoBar2
+    float vLo2 = na(pLiqLoBar2) or na(pLoOurPx2) ? liqLow : pLoOurPx2
+    bool  oneLo = smtBull and smtBull2 and aLo1 == aLo2
+    [sLnA, sLbA] = smtSide(smtBull, pTookLo, smtLoLn, smtLoLb, aLo1, vLo1, raidLoBar, raidLo,
+         "+SMT " + pName + (oneLo ? " · " + pName2 : ""), "+SMT: " + pName + " held its DR low", true)
+    smtLoLn := sLnA
+    smtLoLb := sLbA
+    [sLnB, sLbB] = smtSide(smtBull2 and not oneLo, pTookLo2 or oneLo, smtLoLn2, smtLoLb2, aLo2, vLo2, raidLoBar, raidLo,
+         "+SMT " + pName2, "+SMT: " + pName2 + " held its DR low", true)
+    smtLoLn2 := sLnB
+    smtLoLb2 := sLbB
+    int   aHi1 = na(pLiqHiBar) or na(pHiOurPx) ? liqHiBar : pLiqHiBar
+    float vHi1 = na(pLiqHiBar) or na(pHiOurPx) ? liqHigh : pHiOurPx
+    int   aHi2 = na(pLiqHiBar2) or na(pHiOurPx2) ? liqHiBar : pLiqHiBar2
+    float vHi2 = na(pLiqHiBar2) or na(pHiOurPx2) ? liqHigh : pHiOurPx2
+    bool  oneHi = smtBear and smtBear2 and aHi1 == aHi2
+    [sLnC, sLbC] = smtSide(smtBear, pTookHi, smtHiLn, smtHiLb, aHi1, vHi1, raidHiBar, raidHi,
+         "-SMT " + pName + (oneHi ? " · " + pName2 : ""), "-SMT: " + pName + " held its DR high", false)
+    smtHiLn := sLnC
+    smtHiLb := sLbC
+    [sLnD, sLbD] = smtSide(smtBear2 and not oneHi, pTookHi2 or oneHi, smtHiLn2, smtHiLb2, aHi2, vHi2, raidHiBar, raidHi,
+         "-SMT " + pName2, "-SMT: " + pName2 + " held its DR high", false)
+    smtHiLn2 := sLnD
+    smtHiLb2 := sLbD
 // ─── Delivery complete ───────────────────────────────────────────────────
 // The setup's target is the far end of the dealing range. Once price reaches
 // it the session has done its job, and anything the engine finds afterwards
@@ -3503,8 +3616,8 @@ if barstate.islast and manOn and (calcLong or calcShort)
 //   Clock   CME / 24/7, and price ignored while CME was closed (clocked perps)
 //   Long 2.7R | Entry | SL | TP               (armed or filled trade, or Manual)
 // Rebuilt on the last bar so the rows always sit together.
-var table tbl = na
-if statusOn and barstate.islast
+// v1.13: built in a function (the script's main body has a size limit).
+buildStatus(table old) =>
     [stS, stN] = statusPair()
     array<string> rLb = array.new_string()
     array<string> rVl = array.new_string()
@@ -3541,21 +3654,58 @@ if statusOn and barstate.islast
         array.push(rLb, "Swept")
         array.push(rVl, inLiq or not liqClosed ? "Auto · pending" : swAutoTxt != "" ? swAutoTxt + " · armed" : "Auto · none taken")
     // v1.04: SMT, for the side in play.
-    if smtOn
+    // v1.13: each pair judged alone; the row names the pair(s) that held.
+    if smtOn or smtOn2
         string smV = ""
-        if not smtLive
-            smV := smtSym == "" ? "set a pair" : "pair not found"
-        else if pOk
+        if not smtLive and not smtLive2
+            smV := (smtOn and smtSym != "") or (smtOn2 and smtSym2 != "") ? "pair not found" : "set a pair"
+        else if pOk or pOk2
             bool loSide = dirState == 1 or (dirState == 0 and sweptLo and not sweptHi)
             bool hiSide = dirState == -1 or (dirState == 0 and sweptHi and not sweptLo)
-            if loSide
-                smV := sweptLo and not armLo and na(pRaidLo) ? "no " + pName + " data in EW" : smtBull ? "+SMT · " + pName + " held" : sweptLo and not armLo ? "No SMT · " + pName + " swept too" : ""
-            else if hiSide
-                smV := sweptHi and not armHi and na(pRaidHi) ? "no " + pName + " data in EW" : smtBear ? "-SMT · " + pName + " held" : sweptHi and not armHi ? "No SMT · " + pName + " swept too" : ""
-            else if smtBullP
-                smV := "+SMT · only " + pName + " swept"
-            else if smtBearP
-                smV := "-SMT · only " + pName + " swept"
+            array<string> aH = array.new_string()   // held
+            array<string> aS = array.new_string()   // swept too
+            array<string> aN = array.new_string()   // no data in the EW
+            array<string> aP = array.new_string()   // only the pair swept
+            if loSide and sweptLo and not armLo
+                if pOk
+                    if smtBull
+                        array.push(aH, pName)
+                    else if na(pRaidLo)
+                        array.push(aN, pName)
+                    else
+                        array.push(aS, pName)
+                if pOk2
+                    if smtBull2
+                        array.push(aH, pName2)
+                    else if na(pRaidLo2)
+                        array.push(aN, pName2)
+                    else
+                        array.push(aS, pName2)
+            else if hiSide and sweptHi and not armHi
+                if pOk
+                    if smtBear
+                        array.push(aH, pName)
+                    else if na(pRaidHi)
+                        array.push(aN, pName)
+                    else
+                        array.push(aS, pName)
+                if pOk2
+                    if smtBear2
+                        array.push(aH, pName2)
+                    else if na(pRaidHi2)
+                        array.push(aN, pName2)
+                    else
+                        array.push(aS, pName2)
+            else if not loSide and not hiSide
+                if smtBullP or smtBearP
+                    array.push(aP, pName)
+                if smtBullP2 or smtBearP2
+                    array.push(aP, pName2)
+            string smSg = loSide or smtBullP or smtBullP2 ? "+" : "-"
+            smV := array.size(aH) > 0 ? smSg + "SMT · " + array.join(aH, " · ") :
+                 array.size(aS) > 0 ? "No SMT · " + array.join(aS, ", ") + " swept too" :
+                 array.size(aN) > 0 ? "no " + array.join(aN, ", ") + " data in EW" :
+                 array.size(aP) > 0 ? smSg + "SMT · only " + array.join(aP, ", ") + " swept" : ""
         if smV != ""
             array.push(rLb, "SMT")
             array.push(rVl, smV)
@@ -3563,16 +3713,16 @@ if statusOn and barstate.islast
     int    scRow = -1
     string scTip = ""
     if scoreOn and (eStage == 2 or eStage == 3) and eDir != 0
-        bool  useSmt = smtOn and smtLive
+        bool  useSmt = (smtOn and smtLive) or (smtOn2 and smtLive2)
         bool  useLvl = (sweptOn and sweptLvl > 0) or autoSw
-        bool  sc1 = eDir == 1 ? smtBull : smtBear
+        bool  sc1 = eDir == 1 ? (smtBull or smtBull2) : (smtBear or smtBear2)
         bool  sc2 = eDir == 1 ? armLo : armHi
         bool  sc3 = not na(eqLvl) and (eDir == 1 ? eEntry <= eqLvl : eEntry >= eqLvl)
         bool  sc4 = not eIfvg
         bool  sc5 = eRound <= 1
         int   scN = (useSmt and sc1 ? 1 : 0) + (useLvl and sc2 ? 1 : 0) + (sc3 ? 1 : 0) + (sc4 ? 1 : 0) + (sc5 ? 1 : 0)
         int   scD = (useSmt ? 1 : 0) + (useLvl ? 1 : 0) + 3
-        scTip := (useSmt ? (sc1 ? "✓" : "✗") + " SMT held\n" : "") + (useLvl ? (sc2 ? "✓" : "✗") + " key level taken\n" : "") +
+        scTip := (useSmt ? (sc1 ? "✓" : "✗") + " SMT held" + (sc1 ? " (" + ((eDir == 1 ? smtBull : smtBear) ? pName : "") + ((eDir == 1 ? smtBull : smtBear) and (eDir == 1 ? smtBull2 : smtBear2) ? " · " : "") + ((eDir == 1 ? smtBull2 : smtBear2) ? pName2 : "") + ")" : "") + "\n" : "") + (useLvl ? (sc2 ? "✓" : "✗") + " key level taken\n" : "") +
              (sc3 ? "✓ " : "✗ ") + (eDir == 1 ? "entry in discount" : "entry in premium") + "\n" + (sc4 ? "✓" : "✗") + " FVG entry (not IFVG)\n" + (sc5 ? "✓" : "✗") + " first entry"
         scRow := array.size(rLb)
         array.push(rLb, "Score")
@@ -3584,18 +3734,18 @@ if statusOn and barstate.islast
     bool  tEng = lvlOn and (eStage == 2 or eStage == 3) and ePath != 0
     bool  tMan = manOn and calcSet
     int   nR   = array.size(rLb)
-    if not na(tbl)
-        table.delete(tbl)
-    tbl := table.new(posOf(stPos), 7, nR + 1,
+    if not na(old)
+        table.delete(old)
+    table tb = table.new(posOf(stPos), 7, nR + 1,
          bgcolor = stBgC, border_width = stBorderW, border_color = stBorderC,
          frame_color = stBorderC, frame_width = stBorderW)
     tSz = sizeOf(stSize)
     for i = 0 to nR - 1
-        table.cell(tbl, 0, i, array.get(rLb, i), text_color = stLblC, text_size = tSz, text_halign = text.align_left)
-        table.cell(tbl, 1, i, array.get(rVl, i), text_color = stTxtC, text_size = tSz, text_halign = text.align_left)
-        table.merge_cells(tbl, 1, i, 6, i)
+        table.cell(tb, 0, i, array.get(rLb, i), text_color = stLblC, text_size = tSz, text_halign = text.align_left)
+        table.cell(tb, 1, i, array.get(rVl, i), text_color = stTxtC, text_size = tSz, text_halign = text.align_left)
+        table.merge_cells(tb, 1, i, 6, i)
     if scRow >= 0
-        table.cell_set_tooltip(tbl, 1, scRow, scTip)
+        table.cell_set_tooltip(tb, 1, scRow, scTip)
     if tEng or tMan
         int    rT   = nR
         bool   tOk  = tEng or calcLong or calcShort
@@ -3604,13 +3754,17 @@ if statusOn and barstate.islast
         bool   t2   = tEng and not na(eTgt2)
         string tHd  = not tOk ? "Check SL / TP" : (tMan ? "Manual " + (tDir == -1 ? "short " : "long ") : (tDir == -1 ? "Short " : "Long ")) + str.tostring(tR, "#.0") + "R" + (t2 ? " / " + str.tostring(eRR2, "#.0") + "R" : "")
         color  tHc  = not tOk ? obBearCol : tDir == -1 ? obBearCol : obBullCol
-        table.cell(tbl, 0, rT, tHd, text_color = tHc, text_size = tSz, text_halign = text.align_left)
-        table.cell(tbl, 1, rT, "Entry", text_color = stLblC, text_size = tSz)
-        table.cell(tbl, 2, rT, fmtP(tEng ? eEntry : calcEn), text_color = stTxtC, text_size = tSz)
-        table.cell(tbl, 3, rT, "SL", text_color = stLblC, text_size = tSz)
-        table.cell(tbl, 4, rT, tEng and eBeOn ? fmtP(eEntry) + " BE" : fmtP(tEng ? eStop : calcSl), text_color = stTxtC, text_size = tSz)
-        table.cell(tbl, 5, rT, "TP", text_color = stLblC, text_size = tSz)
-        table.cell(tbl, 6, rT, fmtP(tEng ? eTgt : calcTp) + (t2 ? " / " + fmtP(eTgt2) : ""), text_color = stTxtC, text_size = tSz)
+        table.cell(tb, 0, rT, tHd, text_color = tHc, text_size = tSz, text_halign = text.align_left)
+        table.cell(tb, 1, rT, "Entry", text_color = stLblC, text_size = tSz)
+        table.cell(tb, 2, rT, fmtP(tEng ? eEntry : calcEn), text_color = stTxtC, text_size = tSz)
+        table.cell(tb, 3, rT, "SL", text_color = stLblC, text_size = tSz)
+        table.cell(tb, 4, rT, tEng and eBeOn ? fmtP(eEntry) + " BE" : fmtP(tEng ? eStop : calcSl), text_color = stTxtC, text_size = tSz)
+        table.cell(tb, 5, rT, "TP", text_color = stLblC, text_size = tSz)
+        table.cell(tb, 6, rT, fmtP(tEng ? eTgt : calcTp) + (t2 ? " / " + fmtP(eTgt2) : ""), text_color = stTxtC, text_size = tSz)
+    tb
+var table tbl = na
+if statusOn and barstate.islast
+    tbl := buildStatus(tbl)
 // v1.02: remembered for the next candle's reopen-gap test.
 if barOK
     pvClose := close
