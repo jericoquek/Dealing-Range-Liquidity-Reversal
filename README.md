@@ -1,4 +1,3 @@
-[README (1).md](https://github.com/user-attachments/files/33669285/README.1.md)
 # Dealing Range Liquidity Reversal
 
 *Formerly Session-Based Liquidity Reversals. It stopped being about the Asia,
@@ -10,7 +9,7 @@ swept, marks the CISD that confirms the reversal, and carries the setup through
 to an entry: an FVG (or the MSS candle's gap), a retest, a stop and a target.
 
 I built it for lower-timeframe execution on index futures (MNQ/NQ, 1m to 5m). It
-also runs on the 24/7 perpetuals that mirror them, held to the CME clock. Every
+also runs on the 24/7 perpetuals that mirror them, on CME hours. Every
 level comes from the dealing range and from candle bodies. There are no ATR
 filters, no point thresholds and nothing tuned to make past sessions look good.
 
@@ -18,18 +17,20 @@ filters, no point thresholds and nothing tuned to make past sessions look good.
 
 ### Status of this release
 
-v1.02, the first public version. A working build, not a finished one.
+v1.12. A working build, not a finished one.
 
 - **Checked against my marks:** 13 Oct 2026 XYZ100 on 1h, 15m, 5m, 3m and 2m, and
-  14 Oct 2026 XYZ100 on 5m. The +CISD lands on the candle I marked on all six.
+  14 Oct 2026 XYZ100 on 5m.
 - **18 Oct 2026 XYZ100, the Sunday-reopen gap sweep:** the 5m +CISD (29,181) and
-  stop (29,255) match my marks on the chart. The 1h (29,270) and 3m (29,181)
-  match when the exported candles are replayed through the rules.
-- **Open:** on 18 Oct 15m the engine takes 29,270; I marked 29,238. Until I can
-  say why, the rule stays as it is.
+  stop (29,255) match my marks. The 15m +CISD (29,238) matches under the v1.05
+  CISD pick when the exported candles are replayed.
+- **20 Oct 2026 XYZ100 5m:** +CISD at the 09:40 open (29,324), as marked.
+- **26 and 28 Oct 2026:** replayed from the exported candles, the v1.09 and
+  v1.10 CISD kills fire where I expected (10:39 on 26 Oct 3m, 04:00 on 28 Oct
+  5m).
 - **Not yet re-checked under the current rules:** my earlier sessions (1, 2, 7
-  and 8 Oct), the hand-marked NQ set, the Dated DR's time zone, and the perp
-  clock switched off.
+  and 8 Oct), the hand-marked NQ set, the Dated DR's time zone, Previous-candle
+  DR through a full C2/C3 cycle, and the auto swept level.
 
 ---
 
@@ -76,7 +77,12 @@ the sweep, the CISD and the FVG retest have all printed.
 ## Settings, in order
 
 Market · DR window · Dated DR · Swept level · DR / EW boxes · DR levels ·
-Structure levels · Entry model · RR calculator · Fib levels · Status block · Alerts
+Structure levels · Entry model · RR calculator · Fib levels · SMT · Status block ·
+Alerts
+
+### Market
+
+- **CME hours only** (on by default): see *Perpetual futures and CME hours*.
 
 ### DR window
 
@@ -85,9 +91,30 @@ Structure levels · Entry model · RR calculator · Fib levels · Status block �
   always starts at the DR's end, so a 19:00–23:00 DR with an end of 10:00 gives
   an EW of 23:00 → 10:00. It may cross midnight.
 - Defaults: DR 18:00–20:00, EW ends 00 : 00.
+- **The end is exclusive.** A candle belongs to a window when it opens inside it,
+  so 20:00–04:00 ends with the candle that opens before 04:00 (03:55 on 5m). The
+  04:00 candle is the first EW candle. That keeps the DR the same on every chart
+  timeframe.
+- **DR source:** **Window** (the times above) or **Previous candle** (see below).
 - Alerts are tagged with the DR window, e.g. `[DR 19:00–23:00]`, or `[Dated DR]`.
 
 To watch two dealing ranges, add the indicator twice.
+
+### Previous-candle DR
+
+**DR source → Previous candle** uses the last closed 15m, 30m, 1H, 4H or 1D
+candle as the DR, the CRT way. **Auto** picks it from the chart: 1m → 15m,
+3m → 30m, 5m → 1H, 15m → 4H, higher → 1D.
+
+- Candles sit on a grid anchored at 18:00 New York (4H: 18, 22, 02, 06, 10, 14).
+- The EW is the next two candles, C2 and C3. The EW row counts down to the end
+  of the current one.
+- If the setup is still live when C3 opens, it carries on. If C3 ends with a
+  trade open, the EW closes and the next candle is a fresh range. Otherwise the
+  range rolls to the candle that just closed.
+- The chart has to divide both the hour and the candle (1, 2, 3, 5, 10, 15, 20,
+  30m or 1H), and be smaller than the candle.
+- The Swept level is Window and Dated DR only.
 
 ### Dated DR
 
@@ -97,7 +124,7 @@ time instead: a checkbox plus **From**, **To** and **EW to**, greyed out while
 it's unticked.
 
 - From its start it is the only DR; the daily schedule is off.
-- It starts on the first candle at or after From that the CME clock counts.
+- It starts on the first candle at or after From that CME hours count.
 - The EW runs from To to EW to, which can be days later.
 - Set To on the close of the candle that made the extreme you want inside. On
   11–12 Oct 2026 the low came in Monday's 22:00 hour, so the DR ran Sunday 19:00
@@ -125,6 +152,13 @@ the DR high or low itself. The DR's extreme has to trade through it.
   (the DR is still forming).
 - It applies to the latest DR only. Untick it when that DR's EW is done.
 
+**Auto swept level** (off by default) does the same with PDH / PDL and
+PWH / PWL, on the CME day (18:00 New York) and week (Sunday 18:00), built from
+the chart's own CME-hours candles. A level counts only if it was still untaken
+when the DR started and the DR's own extreme then traded through it. Both sides
+can arm. The furthest level taken is named in the Swept row (PWL over PDL). A
+level you typed overrides it.
+
 ---
 
 ## The CISD
@@ -136,11 +170,15 @@ While the engine hunts, only the **run into the sweep** counts.
 | **Run** | The consecutive bearish candles (bullish for a short) into the raid extreme. It ends at the raid candle, or at the candle before it when the raid candle closes the other way. A doji or an opposite candle ends the run. If none of the run's candles opened inside the DR, the run keeps going back through candles sitting wholly outside the DR until it reaches the one that opened inside |
 | **Sweep candles** | Every candle that traded beyond the DR level, until the CISD is accepted |
 | **Acceptance** | The first body close **above the sweep** (above the highs of all the sweep candles), or above the whole run. A close still inside the sweep's wick doesn't count |
-| **CISD** | The run candle that close takes: the **closest** one, the highest open still below the close (the lowest above it, for a short), at or beyond the swept DR level |
+| **CISD** | The **lowest run open that no close has reclaimed** between the run's end and the raid extreme (the highest, for a short): the last down candle into the low, stepping up a candle if price already took it back. If every open was reclaimed, the closest one below the accepting close |
 | **Block** | From that candle to the end of the run, across the bodies |
 | **Re-read** | A lower low (higher high) before acceptance re-reads the run from the new extreme |
 
 One CISD per raid extreme. After a CISD dies, the next one needs a new extreme.
+
+The tables below were recorded under the earlier pick (the closest open below
+the accepting close). Since v1.05 the pick can sit lower, e.g. 20 Oct 5m:
+09:40 open 29,324, not 09:20's 29,436.
 
 | Chart | Accepted by | +CISD | Block |
 |---|---|---|---|
@@ -181,7 +219,7 @@ are just drift into the halt.
 - The run is stored when the DR extreme forms, so it still reads on 1m–5m after a
   weekend has pushed it more than 500 candles back.
 
-18 Oct 2026 XYZ100, CME clock on. The DR low (29,094) printed Friday 15:00. The
+18 Oct 2026 XYZ100, CME hours only on. The DR low (29,094) printed Friday 15:00. The
 Sunday 18:00 reopen gapped down to 29,087 and closed back up:
 
 | Chart | Run into the DR low | Accepted by | +CISD |
@@ -214,15 +252,24 @@ nothing in the entry model uses them.
 ## Invalidation
 
 Every PD array dies by itself on **two consecutive body closes beyond it**. A
-wick never kills anything.
+wick never kills a PD array. A close exactly on the level doesn't count. The one
+wick rule is the raid extreme, which isn't a PD array: it's the protective
+high or low the whole setup stands on.
 
-| PD array | What it is | When it dies |
-|---|---|---|
-| **DR high / low** | a line | That side waits for a close back inside the DR before a CISD can form on it again |
-| | | A close beyond it by **a quarter of the DR's length**: the reversal on that side is off for this DR; define a new one. A CISD held on that side dies |
-| **CISD** | its block | Its OBs, PBs and FVG die with it, an open trade is flattened at that close, and the engine hunts for the next CISD |
-| **OB / PB** | its block | That block only |
-| **FVG** | the three-candle gap, or the merged zone | That zone only; while the CISD holds, the engine looks for the next FVG |
+Nothing is judged after the EW closes. Everything freezes where it is.
+
+| PD array | Edge | When it dies | What happens |
+|---|---|---|---|
+| **Sweep** | — | never | A raid can't un-happen |
+| **DR high / low** | a line | **a)** two closes beyond it · **b)** one close beyond it by **a quarter of the DR's length** | **a)** that side waits for a close back inside the DR before a CISD can form on it · **b)** that side is off for this DR, and a CISD held on it dies |
+| **CISD** | its block, capped at the swept level | **a)** price trades beyond the raid extreme it was built from (a wick is enough) · **b)** two closes beyond the nearer of its block edge and the swept level · **c)** rule b of the DR side | Its OBs, PBs and uninverted FVGs die with it, an open trade is flattened and taken off, and the engine hunts for the next CISD |
+| **OB / PB** | its block | two closes beyond it | That block only |
+| **FVG** | its far edge | **a)** two closes through it inside the EW · **b)** its CISD dies first | **a)** it inverts: `+FVG` becomes `-IFVG`, display only · **b)** removed |
+| **IFVG** | its far edge, now on the other side | two closes back through it | Removed. It survives a CISD kill |
+
+The **swept level** is the DR high or low, or your Swept level (manual or auto)
+when it armed that side. A CISD block that reaches into the raid is capped
+there, so it can't outlive price closing back beyond the level it swept.
 
 ---
 
@@ -230,6 +277,9 @@ wick never kills anything.
 
 The sweep, the CISD and an FVG that gets retested carry the trade. The MSS is
 drawn when it prints but doesn't gate the entry.
+
+**Direction** (first row of Entry model): Both, Long only or Short only, to
+match a daily bias. The other side isn't hunted, and its sweep zone isn't drawn.
 
 1. **Path A: sweep → CISD → FVG.** The first FVG in the reversal direction after
    the raid extreme. If the MSS prints and no FVG has been presented, the **IFVG**
@@ -250,9 +300,10 @@ other is dropped. A zone can't fill on the candle that armed it.
 | **Target** | Two checkboxes on one row under **Trade levels** (RR calculator). **TP at EQ** (on by default): EQ if it pays 2R or more, else the DR's 0.705 (measured from the swept extreme) if it pays 2R or more. **TP at the opposite DR extreme**: the DR low for a short, the DR high for a long, if it pays 2R or more. Both on: EQ (or the 0.705) is TP1 and the trade runs to the far extreme, TP2; each label shows its own R and the stop stays where it is. No target at 2R, no trade. After a stop, price reaching TP1 before the re-entry fills ends the setup |
 
 - **Before a fill,** the setup ends on a CISD kill, delivery completing, an armed
-  target trading first, or the EW closing.
-- **After a fill,** it ends at the stop, the target, flat at the EW close, or flat
-  at a CISD kill. The stop and the target act on the touch, the way a platform
+  target trading first, or the EW closing. A cancelled limit takes its Entry /
+  SL / TP off the chart, like a cancelled order.
+- **After a fill,** it ends at the stop, the target, flat at the EW close (at the
+  last CME-hours close on a perp), or flat at a CISD kill. The stop and the target act on the touch, the way a platform
   closes the position: the trade comes off the chart while the candle is still
   open. The EW close and the CISD kill act at the close.
 - **Same candle:** a candle that touches both the entry and the target is no
@@ -268,6 +319,10 @@ other is dropped. A zone can't fill on the candle that armed it.
 - **Delivery freeze:** once price reaches the opposite DR extreme, the EW
   stops. A ✓ marks the candle. It's on by default (**Freeze the EW once delivery
   completes**, in Entry model).
+- **Stop to entry** (RR calculator): **Off**, **At TP1** (default) or **At R**.
+  At TP1 acts only with both targets on. Once triggered, the stop sits at the
+  entry from the next candle; a stop there reads `Stopped at entry (BE)`. R is
+  always measured from the original stop.
 
 ### What you see
 
@@ -275,6 +330,11 @@ other is dropped. A zone can't fill on the candle that armed it.
   `+CISD`, `-OB`, `+PB` and so on. **Block boxes** (Structure levels, on by
   default) turns the boxes off; the blocks still work underneath. **Block
   opacity %** sets their fill (default 5). Structure lines run 10 bars by default.
+- **Sweep zone** (Entry model, on by default): a box from the swept level to the
+  raid extreme, marked `+Sweep` / `-Sweep` at the wick that made it. It deepens
+  with the raid and runs until the CISD line ends, or the EW closes if no CISD
+  forms. No zone starts on the candle that completes delivery. Bearish
+  `#F23645`, bullish `#2962FF`, fill **Opacity %** 15.
 - **MSS:** a dashed line from the broken swing to the break.
 - **Zones:** `+FVG`, `-IFVG`, `+FVG (MSS)` with a dotted C.E. line. **FVG line
   length** (Entry model, default 10 bars) sets how far a zone runs past the bar
@@ -283,7 +343,8 @@ other is dropped. A zone can't fill on the candle that armed it.
 - **Trade levels:** Entry, `SL -1R` and `TP xR` labels on a dotted bracket to the
   right of price, blue for Entry and TP, red for SL.
 - **After a stop,** the trade comes off the chart. The zone stays until its own
-  two closes.
+  two closes, and inverts to an IFVG if they come inside the EW. A target hit or
+  an EW-close flat keeps its bracket as a record.
 
 ### RR calculator and Trade levels
 
@@ -299,6 +360,20 @@ SL and TP are just not drawn.
 
 ---
 
+## SMT
+
+A related market is measured over the same DR window. When your DR extreme is
+swept in the EW and the pair holds its own, that's SMT. It never gates a trade.
+
+- **Auto pairs:** XYZ100 / SP500 on trade.xyz, MNQ / MES, NQ / ES, GC / SI. Or
+  pick your own.
+- Shown in the **SMT** row, and as a line from the pair's DR-extreme candle
+  (time-aligned) to your raid extreme, marked `+SMT` / `-SMT`.
+- A side armed by the Swept level is left out: that sweep is of your key level,
+  not of the DR. No pair data in the EW is not a hold.
+
+---
+
 ## Status block
 
 Short rows, in order. A row only shows when it has something to say.
@@ -306,8 +381,11 @@ Short rows, in order. A row only shows when it has something to say.
 | Row | Shows |
 |---|---|
 | **Status** | Where the setup stands: `DR forming` · `Waiting for sweep` · `DR L swept` · `DR L swept on gap` · `Closed below DR L` · `Expanded below DR` · `+CISD` · `Waiting for retest` · `Filled · 3.7R / 8.5R` · `Delivery complete` · `EW closed` |
-| **Next** | The one thing it's waiting for: `Close > 29,270` · `No leg into sweep` · `Waiting for FVG` · `FVG / MSS FVG` · `TP1 reached` · `No trade · +FVG risk too wide` |
-| **Swept** | Your swept level, when ticked: `29,094 · armed` · `not taken` · `pending` |
+| **Next** | The one thing it's waiting for: `Close > 29,270` · `No leg into sweep` · `Waiting for FVG` · `FVG / MSS FVG` · `TP1 reached · SL at entry` · `No trade · +FVG risk too wide` |
+| **EW** | Time left: `ends in 2h 15m`, or `C2 · ends in 40m` in Previous-candle mode |
+| **Swept** | Your swept level: `29,094 · armed` · `not taken` · `pending`, or `PDL 29,010 · armed` / `Auto · none taken` |
+| **SMT** | `+SMT · SP500 held` · `No SMT · SP500 swept too` · `no SP500 data in EW` |
+| **Score** | While a trade is armed or open: e.g. `3/5`. Hover for the list: SMT held, key level taken, entry in discount / premium, FVG (not IFVG), first entry. SMT and key level count only when switched on. Display only |
 | **Clock** | On clocked perps only: `CME`, `CME · 28,890 ignored` (price went beyond the DR while CME was closed), or `24/7` |
 | **Trade** | `Long 2.7R` with Entry, SL and TP, or `Manual long 4.6R` in Manual mode |
 
@@ -325,7 +403,7 @@ with the checkboxes.
 | Setup ready | on | when a zone arms, with limit, SL, TP and R |
 | Zone retest | on | intrabar, on the first touch of the limit |
 | Stop hit | on | intrabar, on the touch of the stop |
-| Target hit | on | intrabar, on the touch of the target; also TP1 when both TP boxes are on |
+| Target hit | on | intrabar, on the touch of the target; also TP1 when both TP boxes are on, and the stop moving to entry |
 | Retest confirmed | on | bar close |
 | Structure active / invalidated | off | bar close |
 
@@ -364,7 +442,11 @@ The script stops with a message if:
 
 - the chart is above 4H, or uses Heikin Ashi, Renko or other synthetic candles;
 - the EW's end equals the DR's end or falls inside the DR;
-- a Dated DR's To isn't after From, or EW to isn't after To.
+- a Dated DR's To isn't after From, or EW to isn't after To;
+- CME hours only is on for a perp and the chart doesn't divide the hour (1H or
+  lower);
+- Previous-candle DR is on and the chart doesn't divide the candle, or isn't
+  smaller than it.
 
 ## Known limitations
 
@@ -374,8 +456,6 @@ The script stops with a message if:
 - The trade levels are drawn, not tested. There's no backtest behind them.
 - On 1H and 4H a candle belongs to the DR or EW only if it opens inside it. Put
   the times on candle boundaries and give the DR several candles.
-- On a 4H perp, the 16:00 NY candle carries the halt inside it. 1H and lower
-  separate it cleanly.
 - Scans look back 500 chart candles, and on a clocked perp the skipped weekend
   candles count toward that. A weekend is 2,940 candles on 1m, 980 on 3m and 588
   on 5m. The gap-sweep run is stored, so that case reads. A normal run that
@@ -384,6 +464,35 @@ The script stops with a message if:
 ---
 
 ## Version history
+
+**v1.12:** **Hold perpetual futures to the CME clock** is now **CME hours only**,
+with the tooltip shared across my indicators. Same behaviour, default on.
+
+**v1.11:** **Stop to entry** (Off / At TP1 / At R). **Setup score** row in the
+status block.
+
+**v1.10:** a wick beyond the raid extreme kills the CISD. The two-close kill
+counts from the nearer of the block edge and the swept level. The sweep zone
+ends with the CISD line.
+
+**v1.09:** third CISD kill, on the raid extreme. No sweep zone on the candle that
+completes delivery.
+
+**v1.08:** nothing is judged after the EW closes. A cancelled limit takes its
+bracket off. The EW-close flat uses the last CME-hours close.
+
+**v1.07:** sweep zone, with `+Sweep` / `-Sweep`.
+
+**v1.06:** auto swept level (PDH / PDL, PWH / PWL). Drawings on long dated ranges
+no longer stop the script.
+
+**v1.05:** new CISD pick (lowest unreclaimed run open). A failed FVG inverts to
+an IFVG inside the EW. SMT drawn as a time-aligned line. Guards for clocked perps
+and Previous-candle DR. Swept level limited to Window and Dated DR.
+
+**v1.04:** SMT against a paired market.
+
+**v1.03:** Previous-candle DR.
 
 **v1.02:**
 - **Gap sweep.** When the reopen candle sweeps the DR extreme on a gap, the CISD
