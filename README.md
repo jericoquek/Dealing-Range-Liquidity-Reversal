@@ -1,4 +1,4 @@
-[README_v1.13.md](https://github.com/user-attachments/files/34307326/README_v1.13.md)
+[README_v1.14.md](https://github.com/user-attachments/files/34511634/README_v1.14.md)
 # Dealing Range Liquidity Reversal
 
 *Formerly Session-Based Liquidity Reversals. It stopped being about the Asia,
@@ -18,7 +18,7 @@ filters, no point thresholds and nothing tuned to make past sessions look good.
 
 ### Status of this release
 
-v1.13. A working build, not a finished one.
+v1.14. A working build, not a finished one.
 
 - **Checked against my marks:** 13 Oct 2026 XYZ100 on 1h, 15m, 5m, 3m and 2m, and
   14 Oct 2026 XYZ100 on 5m.
@@ -78,8 +78,8 @@ the sweep, the CISD and the FVG retest have all printed.
 ## Settings, in order
 
 Market · DR window · Dated DR · Swept level · DR / EW boxes · DR levels ·
-Structure levels · Entry model · RR calculator · Fib levels · SMT · Status block ·
-Alerts
+Structure levels · Entry model · RR calculator · SD projection · Fib levels · SMT ·
+Status block · Alerts
 
 ### Market
 
@@ -361,6 +361,28 @@ SL and TP are just not drawn.
 
 ---
 
+## SD projection
+
+Drawn once the CISD confirms. **1** is the raid extreme, **0** the other end of
+the leg, and the levels project away from the raid.
+
+- **Manipulation** (default): 0 is the swing the last push into the raid
+  launched from (the MSS swing).
+- **Distribution:** 0 is the first confirmed swing after the raid.
+- **Levels:** `1, 0, -0.5, -1, -1.5, -2, -2.5, -3.5, -4` (editable), in
+  `#424351` at 50%.
+- A CISD kill removes it. It freezes at the EW close.
+
+**Far target** (RR calculator): **DR extreme** (default), or **SD in the DR**:
+the deepest of -4 / -3.5 / -2.5 / -2 SD still inside the DR, else the DR
+extreme. It applies to TP at the opposite DR extreme and to TP2. The 2R rule is
+unchanged.
+
+e.g. 6 Nov 2026 MNQ 1m short: 1 = 27,425 (09:53), 0 = 27,307.75 (09:50),
+-2 SD = 27,073.25, inside the DR low (27,035.75), so that's the TP.
+
+---
+
 ## SMT
 
 Up to two related markets are measured over the same DR window, each on its
@@ -480,6 +502,10 @@ The script stops with a message if:
 ---
 
 ## Version history
+
+**v1.14:** SD projection (manipulation or distribution leg). Far target can be
+the deepest SD level inside the DR. Script tidied: old version notes moved here,
+unused code removed.
 
 **v1.13:** SMT against two pairs at once, naming the one that held. Auto pairs
 cover the ES / NQ / YM triad on CME index futures, micros included. GC / SI and
