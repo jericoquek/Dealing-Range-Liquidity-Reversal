@@ -1,6 +1,6 @@
 //@version=6
 // ─────────────────────────────────────────────────────────────────────────
-// Dealing Range Liquidity Reversal  v1.13
+// Dealing Range Liquidity Reversal  v1.14
 //
 // One dealing range (DR) per chart, on the daily schedule or fixed by date.
 // In the execution window (EW) a sweep of the DR arms the reversal and the
@@ -74,170 +74,15 @@
 // past its raid extreme stops finding zones: for a long Dated DR use 5m or
 // higher.
 //
-// Versions
-//   v1.13 SMT against two pairs at once. Auto: the index triad on CME futures
-//         (YM: ES and NQ; MYM: MES and MNQ; NQ: ES and YM; MNQ: MES and MYM;
-//         ES: NQ and YM; MES: MNQ and MYM); GC / SI and the trade.xyz pair stay
-//         one pair. Each pair is judged alone; the SMT row and the chart name
-//         the pair that held. Score counts SMT once if either held.
-//   v1.12 Setting renamed "Hold perpetual futures to the CME clock" -> "CME
-//         hours only", with the tooltip shared across the indicators. Default
-//         on; behaviour unchanged.
-//   v1.11 Stop to entry: Off / At TP1 / At R (default At TP1, which acts only
-//         with both targets on). Once triggered the stop sits at the entry
-//         from the next candle; a stop there reads "Stopped at entry (BE)".
-//         The trade's R stays measured from the original stop. Setup score
-//         row in the status block while a trade is armed or open: SMT held,
-//         key level taken (Swept level, manual or auto), entry in discount /
-//         premium, FVG entry (not IFVG), first entry (not a re-entry). SMT
-//         and key level count only when switched on. Display only.
-//   v1.10 CISD kills tightened. The raid-extreme kill fires on a wick: price
-//         trading beyond the raid extreme the CISD was built from ends it
-//         (that extreme is the protective high / low, not a PD array). The
-//         two-close kill counts against the nearer of the block's edge and
-//         the swept level (the DR high / low, or the Swept level that armed
-//         that side): a block built partly from candles inside the raid no
-//         longer outlives price closing back beyond the level it swept.
-//         Sweep zone: once a CISD forms on its side, the zone stops at the
-//         CISD line's end instead of running to the EW close.
-//   v1.09 Third CISD kill: one body close beyond the raid extreme as it
-//         stood when the CISD confirmed (below the raid low for a +CISD,
-//         above the raid high for a -CISD) kills it at once, like the
-//         two-close block kill. Sweep zone: none is started on the bar
-//         delivery completes (the target candle taking the far DR extreme
-//         is not a raid).
-//   v1.08 Lifecycle fixes. Nothing is judged after the EW closes: the
-//         CISD's two-close count, the OB / PB kills, retest voids and kept
-//         FVG / IFVG zones all stop at the EW close and freeze where they
-//         are (the quarter-expansion kill already did). A trade open at the
-//         EW close is always "Flat at EW close", never a post-EW CISD kill.
-//         A limit cancelled before it fills (CISD invalidated, delivery
-//         complete, EW closed, target first) takes its Entry / SL / TP
-//         bracket off the chart, like a cancelled order; filled trades are
-//         unchanged (a stop clears, a target or EW close stays as record).
-//         The EW-close flat price is the last CME-valid close, not the
-//         halt candle's on a clocked perp.
-//   v1.07 Sweep zone. Once a DR extreme is swept in the EW, a box from the
-//         swept level (the DR low / high, or the Swept level, manual or
-//         auto, that armed that side) to the raid extreme, with +Sweep /
-//         -Sweep at the wick that made it. The box deepens with the raid and
-//         runs right until the EW ends or delivery completes. Display only;
-//         follows the Direction filter.
-//   v1.06 Auto swept level (off by default): PDH / PDL and PWH / PWL on
-//         the CME day (18:00 NY) and week (Sunday 18:00), from the chart's
-//         own CME-valid candles, never request.security. A level counts only
-//         if it was still untaken when the DR started and the DR's own
-//         extreme then traded through it; that side arms exactly as the
-//         manual Swept level does, and both sides can arm. The furthest level
-//         taken is named (PWL over PDL). The manual level, when it applies,
-//         overrides it. Works in every DR source, Previous candle included.
-//         Drawings: every past-dated x is clamped to 9,999 bars back, so a
-//         long Dated DR on 1m no longer stops the script.
-//   v1.05 Review fixes. Swept level: Window and Dated DR only (a rolling
-//         candle DR could arm it on old ranges). Guards: a clocked perp
-//         with the CME clock on needs a chart that divides the hour, and
-//         the Previous-candle DR needs a chart that divides the candle, so
-//         no bar straddles the halt or a candle boundary. A candle never
-//         outlasts its own length (DST fall-back). SMT needs a pair bar in
-//         the EW for that side; no data is not a hold. The candle DR box
-//         ends on the last valid candle. SMT drawn as a line from the DR
-//         extreme to the raid extreme, +SMT / -SMT centred on it; the line
-//         starts on the pair's DR-extreme candle (time-aligned), at your
-//         high / low there. An FVG two
-//         closes through its far edge in the EW inverts (display only):
-//         +FVG -> -IFVG, -FVG -> +IFVG. This covers zones left by a target
-//         reached before entry, as well as by a stop. An inverted zone
-//         stays when the CISD dies and comes off on two closes back
-//         through it. CISD pick: the lowest run open no close has
-//         reclaimed between the run's end and the raid extreme (the last
-//         down candle into the low, stepping up if already reclaimed); if
-//         every open was reclaimed, the v7.25 pick. Acceptance unchanged.
-//         20 Oct 5m: 09:40 open 29,324, not 09:20's 29,436.
-//   v1.04 SMT, anchored to the sweep. A related market (auto: XYZ100 / SP500
-//         on trade.xyz, MNQ / MES, NQ / ES, GC / SI) is measured over the same
-//         DR window. When one side's DR extreme is swept and the pair holds
-//         its own, that is SMT: an SMT row in the status block and an SMT
-//         mark at the raid. It never gates a trade. Missing pair bars are
-//         left empty, never carried forward.
-//   v1.03 DR source: Previous candle. The DR is the last closed higher-
-//         timeframe candle (15m / 30m / 1H / 4H / 1D, or Auto by chart), on a
-//         grid anchored to the CME day (18:00 NY; 4H = 18, 22, 02, 06, 10, 14).
-//         The EW is C2, and C3 too once C2 has swept C1. A live setup holds
-//         the cycle; otherwise every new candle rolls the range forward. A
-//         trade still open when C3 ends is flattened at the EW close, and the
-//         next candle is a fresh range.
-//   v1.02 Gap sweep: when the DR extreme is swept by the reopen candle (after
-//         the daily halt or the weekend) with a gap toward the sweep, the
-//         CISD comes from the run into the DR extreme, and the reopen
-//         candle may accept it with its own close. Picked as in v7.25. The
-//         run is kept as values, so it still reads on 1m-5m after a
-//         weekend. Stop: when the zone's first candle is the raid
-//         extreme, the stop goes beyond the next candle instead (18 Oct
-//         5m: 29,255, not the 29,087 sweep low). Direction filter (Both /
-//         Long only / Short only). EW row: time left in the execution
-//         window. Swept level: dotted line at the
-//         level, and the status line says whether it armed or why not.
-//         CME clock: the Clock row says when price went beyond the DR
-//         while CME was closed and was ignored. Status block rebuilt:
-//         short Status / Next / EW / Swept / Clock rows, then the trade row.
-//   v1.01 First public release. Engine unchanged from v7.28. Settings:
-//         the Session group is now DR window, the execution window's
-//         end reads HH : MM, and Session boxes is now DR / EW boxes.
-// Pre-release development
-//   v7.28 Stop and target act on the tick, like a platform closing the
-//         position: trade off the chart, status and Stop hit / Target hit
-//         alerts on the touch. Live, the first level touched wins; on history
-//         a candle through both stays unclear. EW close and kills unchanged.
-//   v7.27 TP at EQ and TP at the opposite DR extreme, each a checkbox. Both
-//         on: EQ (or the 0.705) is TP1 and the trade runs to the DR's far end,
-//         TP2, each label carrying its R. The run walk-back is rewritten as one
-//         staged walk (v7.26's never ran on TradingView). The status line shows
-//         what the CISD hunt reads on each side.
-//   v7.26 A run into the raid that holds no candle opened inside the DR
-//         keeps walking back through candles fully outside the DR to the
-//         one that opened inside it, so 1m/2m find the same CISD as 3m/5m.
-//   v7.25 CISD accepted by a body close above the sweep (or the whole run),
-//         taking the closest run candle below that close.
-//         Every PD array is a block that dies by itself on two consecutive
-//         body closes beyond it: DR high / low (a line), CISD, OB, PB (the
-//         bodies of their candles), FVG. A dead DR side waits for a close
-//         back inside; a quarter-DR expansion beyond it turns that side off.
-//         A dead CISD still takes its OBs, PBs, FVG and open trade with it.
-//   v7.24 CISD from the run into the raid extreme: the open of the run's first
-//         candle, accepted on the first close back through it. Older legs can
-//         no longer print as the CISD.
-//   v7.23 Session dropdown removed. The EW starts at the DR's end; only its
-//         end time is set. Alerts are tagged with the DR window.
-//   v7.22 Stacked FVGs setting. First gap only (default): path A trades the
-//         first gap after the raid extreme and never extends. Merge: v7.11
-//         behaviour.
-//   v7.21 Trade levels: one trade at a time, Engine or Manual. Manual draws
-//         your RR calculator levels on the chart and in the status block in
-//         place of the engine's trade.
-//   v7.20 Session dropdown. Dated DR in its own group with an EW end; it
-//         starts on the first CME-valid candle at or after From. -1 / +1
-//         and the range stats / filter removed. The CME clock reaches the
-//         structure. Entry and target on one candle is no trade. 0.705
-//         rounded on its own price step. Runs on charts up to 4H.
-//         Settings reset required.
-//   v7.19 Dated DR.
-//   v7.18 CISD at the earliest candidate a close takes; any close confirms
-//         it; third kill (two closes back through the CISD); a re-formed
-//         CISD works from its own swing; chained volume imbalances; stop at
-//         the zone's first candle; 2R minimum; RR calculator; trade shown
-//         as labels on a dotted bracket.
-//   v7.17 Swept level.
-//   v7.16 CISD kill on one close beyond the raid extreme.
-//   v7.15 Uncapped re-entry after a stop; FVG violated by two body closes.
-//   v7.14 A stop keeps the zone on the chart.
-//   v7.12 CME clock detection for BINANCE:CLUSDT.P.
-//   v7.11 Stacked FVGs merge into one zone.
-//   v7.10 CME clock on every HIP3XYZ market and CLUSDT.P; first opposing
-//         candle anchors the CISD; CISD kill by two closes beyond the DR.
-//   v7.0-7.9 Entry model (MSS, FVG / IFVG, two paths), CME clock (hold, not
-//         gate), CISD and blocks contained in the EW.
-//   v60-v69 Delivery freeze, retracement band, DR / EW naming.
-// ─────────────────────────────────────────────────────────────────────────
+// Latest change (full history: README, Version history, on GitHub)
+//   v1.14 SD projection. Once the CISD confirms: 1 at the raid extreme, 0 at
+//         the leg's other end, the manipulation leg (the swing the last push
+//         into the raid launched from; the MSS swing) or the distribution leg
+//         (the first confirmed swing after the raid). Levels from your list,
+//         projected away from the raid. A CISD kill removes it; it freezes
+//         at the EW close. Far target: DR extreme (as before) or SD in the
+//         DR, the deepest of -4 / -3.5 / -2.5 / -2 SD still inside the DR,
+//         else the DR extreme. 2R gate unchanged.
 indicator("Dealing Range Liquidity Reversal", overlay = true,
      max_lines_count = 500, max_labels_count = 500, max_boxes_count = 500,
      max_bars_back = 1000)   // the bar scans read close[off] at dynamic offsets
@@ -385,6 +230,15 @@ tpDr   = input.bool(false, "TP at the opposite DR extreme", group = grpRR, inlin
 beMode = input.string("At TP1", "Stop to entry", options = ["Off", "At TP1", "At R"], group = grpRR, inline = "be")
 beR    = input.float(1.0, "R", minval = 0.1, step = 0.1, group = grpRR, inline = "be",
      tooltip = "At TP1: once TP1 trades the stop moves to the entry; it acts only with both targets on (TP1 at EQ, TP2 at the far DR extreme). At R: once price reaches this many R in profit. The move takes effect from the next candle. Off: the stop never moves. The trade's R is always measured from the original stop. Engine trade only.")
+// v1.14: what "the opposite DR extreme" target means.
+tpFar  = input.string("DR extreme", "Far target", options = ["DR extreme", "SD in the DR"], group = grpRR,
+     tooltip = "Used wherever the far target applies (TP at the opposite DR extreme, and TP2 with both targets on). DR extreme: the DR low for a short, the DR high for a long. SD in the DR: the deepest of -4, -3.5, -2.5 and -2 SD that is still inside the DR; if none is, the DR extreme. Needs the SD projection's anchors (see SD projection), so it falls back to the DR extreme until they exist. The 2R rule is unchanged.")
+grpSd  = "SD projection"
+sdOn   = input.bool(true, "SD projection", group = grpSd, inline = "sd",
+     tooltip = "Drawn once the CISD confirms. 1 sits at the raid extreme, 0 at the other end of the leg. Manipulation: the swing the last push into the raid launched from (the MSS swing). Distribution: the first confirmed swing after the raid, 2 candles after it prints. Levels project away from the raid (below for a short, above for a long). A CISD kill removes it; it freezes at the EW close.")
+sdLeg  = input.string("Manipulation", "", options = ["Manipulation", "Distribution"], group = grpSd, inline = "sd")
+sdLvIn = input.string("1, 0, -0.5, -1, -1.5, -2, -2.5, -3.5, -4", "Levels", group = grpSd,
+     tooltip = "Comma-separated. 1 is the raid extreme, 0 the leg's other end, negative values project beyond 0.")
 bool tpEq  = tpEqIn or not tpDr
 bool tgtDr = tpDr and not tpEq   // the opposite extreme is the ONLY target
 bool lvlOn = lvlSrc == "Engine"
@@ -584,10 +438,6 @@ var float pRaidLo = na
 var float spHi    = na      // pair over the forming candle (Previous-candle DR)
 var float spLo    = na
 var float pdPHi   = na
-var int   liqHiT  = na      // v1.05: time of the DR high / low and of the raid extremes
-var int   liqLoT  = na
-var int   raidHiT = na
-var int   raidLoT = na
 var float pdPLo   = na
 var label smtLoLb = na
 var label smtHiLb = na
@@ -688,6 +538,11 @@ var float sweepHiUp  = na       // highest high of the candles that traded below
 var float sweepLoDn  = na       // lowest low of the candles that traded above the DR high
 var float cisdBlkHi  = na
 var float cisdRaidPx = na      // v1.09 the raid extreme when the CISD confirmed
+var float sd1   = na            // v1.14 SD anchor 1 (the raid extreme)
+var float sd0   = na            // v1.14 SD anchor 0 (the leg's other end)
+var int   sdDir = 0
+var array<line>  sdLnA = array.new<line>()
+var array<label> sdLbA = array.new<label>()
 var int   loState    = 0        // v7.25 DR low: 0 live, 1 closed through (waiting for return), 2 expanded (side off)
 var int   hiState    = 0        // DR high: same
 var int   loCnt      = 0
@@ -782,7 +637,6 @@ var box    bBx     = na
 var label  bLb     = na
 var line   bCe     = na
 // A stopped trade's zone, kept on the chart as a PD array (v7.14).
-var int          zkDir = 0
 var array<float> zkFar = array.new<float>()   // far edge
 var array<int>   zkCnt = array.new<int>()     // consecutive body closes through it; two remove the zone
 var array<box>   zkBx  = array.new<box>()
@@ -1018,8 +872,6 @@ var float shHi     = na
 var float shLo     = na
 var int   shHiBar  = na
 var int   shLoBar  = na
-var int   shHiT    = na
-var int   shLoT    = na
 var int   shStart  = na
 var int   shStartT = na
 var int   shEnd    = na      // last valid bar of the forming candle
@@ -1027,8 +879,6 @@ var float pdHi     = na      // the closed candle promoted to DR
 var float pdLo     = na
 var int   pdHiBar  = na
 var int   pdLoBar  = na
-var int   pdHiT    = na      // v1.05: times of the extremes (SMT label centring)
-var int   pdLoT    = na
 var int   pdStart  = na
 var int   pdStartT = na
 var int   pdEnd    = na
@@ -1070,9 +920,7 @@ if candleOn and not datedLive and cmeOpen
                 pdHi     := shHi
                 pdLo     := shLo
                 pdHiBar  := shHiBar
-                pdHiT    := shHiT
                 pdLoBar  := shLoBar
-                pdLoT    := shLoT
                 pdStart  := shStart
                 pdStartT := shStartT
                 pdEnd    := shEnd
@@ -1100,9 +948,7 @@ if candleOn and not datedLive and cmeOpen
         shHi     := high
         shLo     := low
         shHiBar  := bar_index
-        shHiT    := time
         shLoBar  := bar_index
-        shLoT    := time
         shStart  := bar_index
         shStartT := time
         shEnd    := bar_index
@@ -1126,11 +972,9 @@ if candleOn and not datedLive and cmeOpen
         if high > shHi
             shHi    := high
             shHiBar := bar_index
-            shHiT   := time
         if low < shLo
             shLo    := low
             shLoBar := bar_index
-            shLoT   := time
         shEnd := bar_index
         if not na(pH) and (na(spHi) or pH > spHi)
             spHi := pH
@@ -1158,9 +1002,7 @@ if (inLiq and not inLiq[1]) or (datedFirst and inLiq) or cycStart   // a liquidi
     liqHigh := high
     liqLow  := low
     liqHiBar := bar_index
-    liqHiT   := time
     liqLoBar := bar_index
-    liqLoT   := time
     liqStartBar := bar_index
     liqStartTime := time
     liqClosed  := false
@@ -1172,6 +1014,11 @@ if (inLiq and not inLiq[1]) or (datedFirst and inLiq) or cycStart   // a liquidi
     cisdBlkLo  := na
     cisdBlkHi  := na
     cisdRaidPx := na
+    sd1        := na
+    sd0        := na
+    sdDir      := 0
+    array.clear(sdLnA)     // last session's SD stays, pruned with its DR
+    array.clear(sdLbA)
     sweepHiUp  := na
     sweepLoDn  := na
     loState    := 0
@@ -1286,11 +1133,9 @@ else if inLiq and cmeOpen
     if high > liqHigh
         liqHigh := high
         liqHiBar := bar_index
-        liqHiT   := time
     if low < liqLow
         liqLow  := low
         liqLoBar := bar_index
-        liqLoT   := time
     if not na(pH) and (na(pLiqHi) or pH > pLiqHi)
         pLiqHi := pH
         pLiqHiBar := bar_index
@@ -1312,9 +1157,7 @@ if cycStart
     liqHigh      := pdHi
     liqLow       := pdLo
     liqHiBar     := pdHiBar
-    liqHiT       := pdHiT
     liqLoBar     := pdLoBar
-    liqLoT       := pdLoT
     liqStartBar  := pdStart
     liqStartTime := pdStartT
     pLiqHi       := pdPHi
@@ -1521,12 +1364,10 @@ bool brkBar = cmeOpen and (not cmeOpen[1] or time - time[1] > timeframe.in_secon
 if inExec and cmeOpen and liqClosed
     if na(raidHi) or high > raidHi
         raidHiBar := bar_index
-        raidHiT   := time
         gapHi     := brkBar and not na(pvClose) and open > pvClose
         gDnRcR    := gDnRc
     if na(raidLo) or low < raidLo
         raidLoBar := bar_index
-        raidLoT   := time
         gapLo     := brkBar and not na(pvClose) and open < pvClose
         gUpRcR    := gUpRc
     raidHi := na(raidHi) ? high : math.max(raidHi, high)
@@ -2812,6 +2653,76 @@ zoneIfvg(int d, int legFrom, int legTo, int toBar, float cap) =>
                     zb := b
                     zc := c1
     [zt, zb, zc]
+// ─── SD projection (v1.14) ───────────────────────────────────────────────
+var array<float> sdF = array.new<float>()
+if barstate.isfirst
+    for t in str.split(sdLvIn, ",")
+        float v = str.tonumber(str.trim(t))
+        if not na(v)
+            array.push(sdF, v)
+sdClear() =>
+    for l in sdLnA
+        line.delete(l)
+    for b in sdLbA
+        label.delete(b)
+    array.clear(sdLnA)
+    array.clear(sdLbA)
+    true
+// Anchors and drawing in functions (the main body has a size limit).
+sdSwing(array<int> sb, array<float> sp, int d) =>
+    float n0 = na
+    int nS = array.size(sb)
+    if nS > 0
+        if sdLeg == "Manipulation"
+            // The swing the last push into the raid launched from.
+            for j = nS - 1 to 0
+                float px = array.get(sp, j)
+                if array.get(sb, j) < cisdSwBar and (d == -1 ? (na(liqHigh) or px <= liqHigh) : (na(liqLow) or px >= liqLow))
+                    n0 := px
+                    break
+        else
+            // The first confirmed swing after the raid.
+            for j = 0 to nS - 1
+                if array.get(sb, j) > cisdSwBar
+                    n0 := array.get(sp, j)
+                    break
+    n0
+sdDraw(float n1, float n0) =>
+    color sc = color.new(#424351, 50)
+    for f in sdF
+        float pv = n0 + f * (n1 - n0)
+        line  l  = line.new(bar_index, pv, bar_index + lineLength, pv, color = sc, width = 1)
+        label b  = label.new(bar_index + lineLength, pv, str.tostring(f) + " (" + fmtP(pv) + ")", style = label.style_label_left,
+             color = color.new(color.white, 100), textcolor = sc, size = size.small)
+        array.push(sdLnA, l)
+        array.push(sdLbA, b)
+        keepL(l)
+        keepB(b)
+    true
+if barOK and inExec and liqClosed and not deliveryDone
+    bool  sdHas = dirState != 0 and not na(cisdRaidPx) and not na(cisdSwBar)
+    float n1 = sdHas ? cisdRaidPx : float(na)
+    float n0 = not sdHas ? float(na) : dirState == -1 ? sdSwing(slBarA, slPxA, -1) : sdSwing(shBarA, shPxA, 1)
+    int   nD = sdHas ? dirState : 0
+    if nz(n1) != nz(sd1) or nz(n0) != nz(sd0) or nD != sdDir
+        sdClear()
+        sd1   := n1
+        sd0   := n0
+        sdDir := nD
+        if sdOn and not na(n0) and not na(n1) and n1 != n0
+            sdDraw(n1, n0)
+// The far target: the DR extreme, or the deepest SD level still inside the DR.
+sdFar(int d) =>
+    float x  = d == -1 ? liqLow : liqHigh
+    string nm = ""
+    if tpFar == "SD in the DR" and sdDir == d and not na(sd0) and not na(sd1) and not na(liqHigh) and not na(liqLow)
+        for f in array.from(-4.0, -3.5, -2.5, -2.0)
+            float pv = sd0 + f * (sd1 - sd0)
+            if d == -1 ? pv >= liqLow : pv <= liqHigh
+                x  := pv
+                nm := str.tostring(f) + " SD "
+                break
+    [x, nm]
 // Target and RR for one path: EQ if it pays 2R or more, else the 0.705 of the
 // DR if it pays 2R or more, else na (no trade). The 0.705 is measured in the
 // TRADE's direction — from the swept extreme toward the far one (DR high down
@@ -2829,7 +2740,8 @@ tgtFor(int d, float en, float st) =>
     float rEq = risk > 0 and not na(tEq) ? (d == -1 ? en - tEq : tEq - en) / risk : float(na)
     float rEx = risk > 0 and not na(tEx) ? (d == -1 ? en - tEx : tEx - en) / risk : float(na)
     // v7.27: DR opposite — the far DR extreme, on its own step, 2R or no trade.
-    float rDr = na(liqHigh) or na(liqLow) ? float(na) : d == -1 ? liqLow : liqHigh
+    [fX, fNm] = sdFar(d)   // v1.14: DR extreme or SD in the DR
+    float rDr = na(liqHigh) or na(liqLow) ? float(na) : fX
     float dStep = priceStep(rDr)
     float tDr = na(rDr) ? float(na) : d == -1 ? math.ceil(rDr / dStep) * dStep : math.floor(rDr / dStep) * dStep
     float rD  = risk > 0 and not na(tDr) ? (d == -1 ? en - tDr : tDr - en) / risk : float(na)
@@ -2855,7 +2767,8 @@ tgt2For(int d, float en, float st, float t1) =>
     float r = na
     if tpEq and tpDr and not na(t1) and not na(liqHigh) and not na(liqLow) and not na(en) and not na(st)
         float risk = math.abs(st - en)
-        float x  = d == -1 ? liqLow : liqHigh
+        [fX2, fNm2] = sdFar(d)   // v1.14
+        float x  = fX2
         float xs = priceStep(x)
         float xt = d == -1 ? math.ceil(x / xs) * xs : math.floor(x / xs) * xs
         float xr = risk > 0 ? (d == -1 ? en - xt : xt - en) / risk : float(na)
@@ -2866,7 +2779,10 @@ tgt2For(int d, float en, float st, float t1) =>
 // v7.27: TP label text names the level it sits on.
 tpTxt(float t, float r) =>
     string nm = ""
-    if not na(t)
+    [sdX, sdNm] = sdFar(eDir)   // v1.14: a target on an SD level is named for it
+    if not na(t) and sdNm != "" and math.abs(t - sdX) <= priceStep(sdX)
+        nm := sdNm
+    else if not na(t)
         nm := not na(eqLvl) and math.abs(t - eqLvl) <= priceStep(eqLvl) ? "EQ " : not na(liqLow) and math.abs(t - liqLow) <= priceStep(liqLow) ? "DR L " : not na(liqHigh) and math.abs(t - liqHigh) <= priceStep(liqHigh) ? "DR H " : "0.705 "
     "TP " + nm + str.tostring(r, "#.0") + "R"
 // Zone box, label and C.E. for one path. Returns the drawings (na if off).
@@ -3068,7 +2984,6 @@ if barOK
                 // v7.18: the stop sits beyond the zone's FIRST candle — its low
                 // for a long, its high for a short — after any chained imbalance
                 // (8 Oct: 07:12 low 30,903). An IFVG keeps its far edge.
-                int sOf = bar_index - fStart
                 aStop    := fI ? (eDir == -1 ? ft : fb) : stopFrom(eDir, fStart, aEntry)
                 aArmBar  := bar_index
                 string kA = (eDir == -1 ? "-" : "+") + (fI ? "IFVG" : "FVG")
@@ -3311,7 +3226,6 @@ if eStage == 3 and bar_index > eFillBar and inExec and cmeOpen
     // The zone outlives the trade. A wick through the stop ends the trade
     // only; the zone goes on two consecutive body closes through its far
     // edge, counted from this bar in the kept-zone block below.
-    float zFar = eDir == -1 ? (ePath == 1 ? aTop : bTop) : (ePath == 1 ? aBot : bBot)
     if hitS and hitT
         eStage := 4
         eMsg   := "Stop and target same bar · unclear"
@@ -3328,7 +3242,6 @@ if eStage == 3 and bar_index > eFillBar and inExec and cmeOpen
         if alTG
             alert("Target hit — " + (eDir == -1 ? "short " : "long ") + "TP " + fmtP(xT) + " (" + str.tostring(na(eTgt2) ? eRR : eRR2, "#.0") + "R) [" + curTag + "]", alert.freq_once_per_bar)
     if hitS
-        zkDir := eDir
         zkAdd(eDir, ePath == 1 and aIfvg, ePath == 1 ? aTop : bTop, ePath == 1 ? aBot : bBot, ePath == 1 ? aBx : bBx, ePath == 1 ? aLb : bLb, ePath == 1 ? aCe : bCe)
     if eStage == 4 and eRound >= 2
         eMsg := eMsg + " · entry " + str.tostring(eRound)
@@ -3382,7 +3295,6 @@ if barOK
         clearTrade(true)   // v1.08: no fill, no bracket
         // v1.05: the armed zones stay PD arrays: two closes through them in
         // the EW invert them, like any other zone.
-        zkDir := eDir
         if aState == 1 and not na(aTop)
             zkAdd(eDir, aIfvg, aTop, aBot, aBx, aLb, aCe)
         if bState == 1 and not na(bTop)
